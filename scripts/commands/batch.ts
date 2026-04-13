@@ -170,7 +170,10 @@ async function pollAndFetch(
 
     if (job.state === "succeeded") {
       const results = await provider.batchFetch(jobId);
-      writeResults(results, outdir, jsonOutput, manifest);
+      const { written, failed } = writeResults(results, outdir, jsonOutput, manifest);
+      if (written === 0 && failed > 0) {
+        process.exit(1);
+      }
       return;
     }
 
@@ -210,9 +213,10 @@ export function writeResults(
   outdir: string,
   jsonOutput: boolean,
   manifest: BatchManifest | null,
-): void {
+): { written: number; failed: number } {
   ensureOutdir(outdir);
   let written = 0;
+  let failed = 0;
 
   for (const r of results) {
     if (r.error) {
@@ -221,6 +225,7 @@ export function writeResults(
       } else {
         console.error(`[${r.key}] Error: ${r.error}`);
       }
+      failed++;
       continue;
     }
 
@@ -233,6 +238,7 @@ export function writeResults(
       } else {
         console.error(`[${r.key}] ${msg}`);
       }
+      failed++;
       continue;
     }
 
@@ -269,7 +275,12 @@ export function writeResults(
 
   if (!jsonOutput) {
     console.log(`\n${written} image(s) saved to ${outdir}`);
+    if (failed > 0) {
+      console.error(`${failed} task(s) failed`);
+    }
   }
+
+  return { written, failed };
 }
 
 async function batchStatus(
@@ -319,8 +330,27 @@ async function batchFetch(
     );
   }
 
+  // Verify job is complete before fetching results
+  if (provider.batchGet) {
+    const job = await provider.batchGet(args.positional);
+    if (job.state !== "succeeded") {
+      console.error(
+        `Job ${args.positional} is not complete (state: ${job.state}).` +
+        (job.state === "failed" ? " Job failed." :
+         job.state === "expired" ? " Job expired. Resubmit." :
+         " Wait for completion or use `batch status` to check."),
+      );
+      process.exit(1);
+    }
+  }
+
   const results = await provider.batchFetch(args.positional);
-  writeResults(results, outdir, args.flags.json, manifest);
+  const { written, failed } = writeResults(results, outdir, args.flags.json, manifest);
+
+  // Exit with non-zero if all results failed
+  if (written === 0 && failed > 0) {
+    process.exit(1);
+  }
 }
 
 async function batchList(
