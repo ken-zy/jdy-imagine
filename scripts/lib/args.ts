@@ -49,36 +49,41 @@ export function parseArgs(argv: string[]): ParsedArgs {
     result.positional = argv[i++];
   }
 
+  function nextVal(flag: string): string {
+    if (i + 1 >= argv.length) throw new Error(`Flag ${flag} requires a value`);
+    return argv[++i];
+  }
+
   // Parse remaining flags
   while (i < argv.length) {
     const arg = argv[i];
     switch (arg) {
       case "--prompt":
-        result.flags.prompt = argv[++i];
+        result.flags.prompt = nextVal(arg);
         break;
       case "--prompts":
-        result.flags.prompts = argv[++i];
+        result.flags.prompts = nextVal(arg);
         break;
       case "--model":
       case "-m":
-        result.flags.model = argv[++i];
+        result.flags.model = nextVal(arg);
         break;
       case "--provider":
-        result.flags.provider = argv[++i];
+        result.flags.provider = nextVal(arg);
         break;
       case "--ar":
-        result.flags.ar = argv[++i];
+        result.flags.ar = nextVal(arg);
         break;
       case "--quality":
-        result.flags.quality = argv[++i];
+        result.flags.quality = nextVal(arg);
         break;
       case "--ref":
         if (!result.flags.ref) result.flags.ref = [];
-        result.flags.ref.push(argv[++i]);
+        result.flags.ref.push(nextVal(arg));
         break;
       case "--outdir":
       case "-o":
-        result.flags.outdir = argv[++i];
+        result.flags.outdir = nextVal(arg);
         break;
       case "--json":
         result.flags.json = true;
