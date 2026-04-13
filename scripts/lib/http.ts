@@ -49,8 +49,17 @@ async function fetchPost(
       body: JSON.stringify(body),
       signal: controller.signal,
     });
-    const data = await res.json();
+    const text = await res.text();
+    let data: unknown;
+    try {
+      data = JSON.parse(text);
+    } catch {
+      data = { error: { message: `Non-JSON response (${res.status}): ${text.slice(0, 200)}` } };
+    }
     return { status: res.status, data };
+  } catch (err) {
+    // Network/timeout errors — return as 503 so retry logic can handle them
+    return { status: 503, data: { error: { message: `Network error: ${(err as Error).message}` } } };
   } finally {
     clearTimeout(timeout);
   }
@@ -82,14 +91,24 @@ function curlPost(
     "\n%{http_code}",
     url,
   ];
-  const output = execFileSync("curl", args, {
-    encoding: "utf-8",
-    maxBuffer: 50 * 1024 * 1024,
-  });
-  const lines = output.trimEnd().split("\n");
-  const statusCode = parseInt(lines.pop()!, 10);
-  const data = JSON.parse(lines.join("\n"));
-  return { status: statusCode, data };
+  try {
+    const output = execFileSync("curl", args, {
+      encoding: "utf-8",
+      maxBuffer: 50 * 1024 * 1024,
+    });
+    const lines = output.trimEnd().split("\n");
+    const statusCode = parseInt(lines.pop()!, 10);
+    const text = lines.join("\n");
+    let data: unknown;
+    try {
+      data = JSON.parse(text);
+    } catch {
+      data = { error: { message: `Non-JSON response (${statusCode}): ${text.slice(0, 200)}` } };
+    }
+    return { status: statusCode, data };
+  } catch (err) {
+    return { status: 503, data: { error: { message: `curl error: ${(err as Error).message}` } } };
+  }
 }
 
 const RETRY_DELAYS_HTTP = [1000, 2000, 4000];
@@ -138,8 +157,16 @@ export async function httpGet(
       headers: buildHeaders(apiKey),
       signal: controller.signal,
     });
-    const data = await res.json();
+    const text = await res.text();
+    let data: unknown;
+    try {
+      data = JSON.parse(text);
+    } catch {
+      data = { error: { message: `Non-JSON response (${res.status}): ${text.slice(0, 200)}` } };
+    }
     return { status: res.status, data };
+  } catch (err) {
+    return { status: 503, data: { error: { message: `Network error: ${(err as Error).message}` } } };
   } finally {
     clearTimeout(timeout);
   }
@@ -164,12 +191,22 @@ function curlGet(
     "\n%{http_code}",
     url,
   ];
-  const output = execFileSync("curl", args, {
-    encoding: "utf-8",
-    maxBuffer: 50 * 1024 * 1024,
-  });
-  const lines = output.trimEnd().split("\n");
-  const statusCode = parseInt(lines.pop()!, 10);
-  const data = JSON.parse(lines.join("\n"));
-  return { status: statusCode, data };
+  try {
+    const output = execFileSync("curl", args, {
+      encoding: "utf-8",
+      maxBuffer: 50 * 1024 * 1024,
+    });
+    const lines = output.trimEnd().split("\n");
+    const statusCode = parseInt(lines.pop()!, 10);
+    const text = lines.join("\n");
+    let data: unknown;
+    try {
+      data = JSON.parse(text);
+    } catch {
+      data = { error: { message: `Non-JSON response (${statusCode}): ${text.slice(0, 200)}` } };
+    }
+    return { status: statusCode, data };
+  } catch (err) {
+    return { status: 503, data: { error: { message: `curl error: ${(err as Error).message}` } } };
+  }
 }
