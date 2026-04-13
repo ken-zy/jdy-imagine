@@ -39,7 +39,13 @@ export function parseDotEnv(content: string): Record<string, string> {
     if (!trimmed || trimmed.startsWith("#")) continue;
     const eq = trimmed.indexOf("=");
     if (eq === -1) continue;
-    result[trimmed.slice(0, eq)] = trimmed.slice(eq + 1);
+    const key = trimmed.slice(0, eq).trim();
+    let val = trimmed.slice(eq + 1).trim();
+    // Strip surrounding quotes
+    if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+      val = val.slice(1, -1);
+    }
+    result[key] = val;
   }
   return result;
 }

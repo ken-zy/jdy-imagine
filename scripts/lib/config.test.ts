@@ -41,6 +41,12 @@ EMPTY=`;
     const result = parseDotEnv("# comment\n\nKEY=val");
     expect(Object.keys(result)).toEqual(["KEY"]);
   });
+
+  test("strips surrounding quotes", () => {
+    const result = parseDotEnv('KEY="value"\nKEY2=\'val2\'');
+    expect(result.KEY).toBe("value");
+    expect(result.KEY2).toBe("val2");
+  });
 });
 
 describe("mergeConfig", () => {
