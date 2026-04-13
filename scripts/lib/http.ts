@@ -55,6 +55,8 @@ async function fetchPost(
       data = JSON.parse(text);
     } catch {
       data = { error: { message: `Non-JSON response (${res.status}): ${text.slice(0, 200)}` } };
+      // Treat non-JSON as server error regardless of original status
+      return { status: 502, data };
     }
     return { status: res.status, data };
   } catch (err) {
@@ -104,6 +106,7 @@ function curlPost(
       data = JSON.parse(text);
     } catch {
       data = { error: { message: `Non-JSON response (${statusCode}): ${text.slice(0, 200)}` } };
+      return { status: 502, data };
     }
     return { status: statusCode, data };
   } catch (err) {
@@ -163,6 +166,8 @@ export async function httpGet(
       data = JSON.parse(text);
     } catch {
       data = { error: { message: `Non-JSON response (${res.status}): ${text.slice(0, 200)}` } };
+      // Treat non-JSON as server error regardless of original status
+      return { status: 502, data };
     }
     return { status: res.status, data };
   } catch (err) {
@@ -204,6 +209,7 @@ function curlGet(
       data = JSON.parse(text);
     } catch {
       data = { error: { message: `Non-JSON response (${statusCode}): ${text.slice(0, 200)}` } };
+      return { status: 502, data };
     }
     return { status: statusCode, data };
   } catch (err) {
