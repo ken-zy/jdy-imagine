@@ -118,14 +118,8 @@ export function parseGenerateResponse(apiResponse: {
   return result;
 }
 
-export function validateBatchTasks(tasks: GenerateRequest[]): void {
-  for (const task of tasks) {
-    if (task.refs.length > 0) {
-      throw new Error(
-        "Batch mode does not support reference images in v0.1. Use `generate` for image-to-image tasks.",
-      );
-    }
-  }
+export function validateBatchTasks(_tasks: GenerateRequest[]): void {
+  // Batch mode supports reference images via inline base64 (same as realtime)
 }
 
 export function buildBatchRequestBody(
@@ -154,13 +148,30 @@ export function buildBatchRequestBody(
   const requests = tasks.map((task, i) => {
     const seq = String(i + 1).padStart(3, "0");
     const slug = generateSlug(task.prompt);
+
+    // Build parts: ref images first (as inlineData), then prompt text
+    const parts: Array<Record<string, unknown>> = [];
+    for (const refPath of task.refs) {
+      const data = readFileSync(refPath);
+      const ext = refPath.split(".").pop()?.toLowerCase();
+      const mimeType = ext === "jpg" || ext === "jpeg" ? "image/jpeg" : "image/png";
+      parts.push({
+        inlineData: {
+          data: Buffer.from(data).toString("base64"),
+          mimeType,
+        },
+      });
+    }
+
     let promptText = task.prompt;
     if (task.ar) {
       promptText += `. Aspect ratio: ${task.ar}.`;
     }
+    parts.push({ text: promptText });
+
     return {
       request: {
-        contents: [{ parts: [{ text: promptText }] }],
+        contents: [{ parts }],
         generationConfig: {
           responseModalities: ["IMAGE"],
           imageConfig: { imageSize: task.imageSize },

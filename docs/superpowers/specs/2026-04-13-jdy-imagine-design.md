@@ -58,7 +58,7 @@ bun scripts/main.ts batch cancel <jobId>
 
 Per-task fields override global CLI args. Paths in `ref` resolve relative to the JSON file's directory.
 
-**v0.1 batch limitation:** `batch submit` does not support `ref` (reference images). If any task in `prompts.json` includes `ref`, the CLI exits with an error: "Batch mode does not support reference images in v0.1. Use `generate` for image-to-image tasks." This avoids the unsolved complexity of uploading/referencing images in batch payloads.
+Batch mode supports `ref` (reference images) by inlining them as base64 in the request body, same as realtime mode. This counts toward the 20MB inline payload limit.
 
 ### Global Options
 
@@ -362,7 +362,7 @@ Simple KEY=VALUE parser, only sets if not already in environment.
 | Output dir not writable | Exit with permission error |
 | Safety block (finishReason=SAFETY) | Exit with safety category/reason, no retry |
 | No image in response (text-only) | Exit with "model returned text instead of image" |
-| Batch task includes ref | Exit with "batch + ref not supported in v0.1" |
+| Batch task ref image not found | Exit with file path in error |
 | Batch payload > 20MB | Exit with "payload too large, split into smaller batches" |
 
 ## Plugin Metadata
@@ -381,7 +381,7 @@ Simple KEY=VALUE parser, only sets if not already in environment.
 - Other providers (OpenAI, Replicate, etc.) — architecture supports it, not implemented
 - `--image` single file output (use `--outdir` only)
 - Batch file-based submission via File API — inline only, CLI enforces 20MB limit with clear error
-- Batch + reference images (`ref` in batch tasks) — CLI validates and exits with error
+- Batch + reference images via File API — inline base64 only (counts toward 20MB limit)
 - EXTEND.md first-time setup wizard
 - Prompt files (`--promptfiles`)
 - Runtime model capability detection — models are configurable via `--model` / env var
