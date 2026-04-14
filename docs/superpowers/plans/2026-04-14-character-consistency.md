@@ -4,7 +4,7 @@
 
 **Goal:** Add `--character` (character bible injection) and `--chain` (star-anchored multi-turn) to jdy-imagine for consistent character generation across multiple images.
 
-**Architecture:** Character profile is a standalone module that injects description + refs into prompts (works for both realtime and batch). Chain mode is Google-provider-internal: preserves raw API response parts including `thoughtSignature` for multi-turn replay. Provider interface gets opaque `ChainAnchor` + optional `generateChained`/`createAnchor` methods.
+**Architecture:** Character profile is a standalone module with two injection functions: `applyCharacterPrompt` (description+negative → prompt prefix, always applied) and `applyCharacterRefs` (reference images → refs merge, skipped for chain tasks 2..N since character refs are already in the anchor's first user turn). Chain mode is Google-provider-internal: preserves raw API response parts including `thoughtSignature` for multi-turn replay. Provider interface gets opaque `ChainAnchor` + optional `generateAndAnchor`/`generateChained` methods — no hidden contracts.
 
 **Tech Stack:** TypeScript, Bun, Google Gemini API (`generateContent` with multi-turn `contents`)
 
@@ -78,37 +78,41 @@ describe("loadCharacter", () => {
 Run: `bun test scripts/lib/character.test.ts`
 Expected: FAIL — module `./character` not found
 
-- [ ] **Step 3: Write failing tests for applyCharacter**
+- [ ] **Step 3: Write failing tests for applyCharacterPrompt and mergeCharacterRefs**
 
 Append to `scripts/lib/character.test.ts`:
 
 ```typescript
-describe("applyCharacter", () => {
+import { applyCharacterPrompt, mergeCharacterRefs } from "./character";
+
+describe("applyCharacterPrompt", () => {
   test("prepends description and negative to prompt", () => {
-    const result = applyCharacter("wearing red dress", [], {
+    const result = applyCharacterPrompt("wearing red dress", {
       description: "25-year-old woman",
       negative: "Do not change face",
       references: [],
     });
-    expect(result.prompt).toBe(
+    expect(result).toBe(
       "25-year-old woman Do not change face wearing red dress",
     );
   });
 
   test("prepends description only when no negative", () => {
-    const result = applyCharacter("wearing red dress", [], {
+    const result = applyCharacterPrompt("wearing red dress", {
       description: "25-year-old woman",
       references: [],
     });
-    expect(result.prompt).toBe("25-year-old woman wearing red dress");
+    expect(result).toBe("25-year-old woman wearing red dress");
   });
+});
 
+describe("mergeCharacterRefs", () => {
   test("merges character refs before task refs", () => {
-    const result = applyCharacter("prompt", ["/task/ref.png"], {
+    const result = mergeCharacterRefs(["/task/ref.png"], {
       description: "desc",
       references: ["/char/front.png", "/char/side.png"],
     });
-    expect(result.refs).toEqual([
+    expect(result).toEqual([
       "/char/front.png",
       "/char/side.png",
       "/task/ref.png",
@@ -116,11 +120,11 @@ describe("applyCharacter", () => {
   });
 
   test("deduplicates refs by absolute path", () => {
-    const result = applyCharacter("prompt", ["/shared/ref.png"], {
+    const result = mergeCharacterRefs(["/shared/ref.png"], {
       description: "desc",
       references: ["/shared/ref.png", "/char/side.png"],
     });
-    expect(result.refs).toEqual(["/shared/ref.png", "/char/side.png"]);
+    expect(result).toEqual(["/shared/ref.png", "/char/side.png"]);
   });
 });
 ```
@@ -163,28 +167,31 @@ export function loadCharacter(filePath: string): CharacterProfile {
   };
 }
 
-export function applyCharacter(
+// Inject description + negative into prompt (always applied, all modes)
+export function applyCharacterPrompt(
   prompt: string,
-  refs: string[],
   character: CharacterProfile,
-): { prompt: string; refs: string[] } {
-  // Build prompt: description + negative + original
+): string {
   const parts = [character.description];
   if (character.negative) parts.push(character.negative);
   parts.push(prompt);
-  const newPrompt = parts.join(" ");
+  return parts.join(" ");
+}
 
-  // Merge refs: character first, then task refs, dedup by path
+// Merge character refs before task refs with dedup (skipped for chain tasks 2..N)
+export function mergeCharacterRefs(
+  taskRefs: string[],
+  character: CharacterProfile,
+): string[] {
   const seen = new Set(character.references);
-  const mergedRefs = [...character.references];
-  for (const r of refs) {
+  const merged = [...character.references];
+  for (const r of taskRefs) {
     if (!seen.has(r)) {
       seen.add(r);
-      mergedRefs.push(r);
+      merged.push(r);
     }
   }
-
-  return { prompt: newPrompt, refs: mergedRefs };
+  return merged;
 }
 ```
 
@@ -331,11 +338,15 @@ git commit -m "feat(args): add --chain and --character flag parsing"
 
 - [ ] **Step 1: Write failing test for ChainAnchor type**
 
-Append to `scripts/providers/types.test.ts`:
+Add to the existing imports in `scripts/providers/types.test.ts` (merge into existing `import type` line):
 
 ```typescript
 import type { ChainAnchor, Provider } from "./types";
+```
 
+Then append test cases:
+
+```typescript
 describe("ChainAnchor type", () => {
   test("ChainAnchor is opaque (accepts any value)", () => {
     const anchor: ChainAnchor = { something: "provider-specific" };
@@ -344,14 +355,14 @@ describe("ChainAnchor type", () => {
 });
 
 describe("Provider chain methods", () => {
-  test("generateChained and createAnchor are optional", () => {
+  test("generateAndAnchor and generateChained are optional", () => {
     const minimalProvider: Provider = {
       name: "test",
       defaultModel: "test-model",
       generate: async () => ({ images: [], finishReason: "STOP" }),
     };
+    expect(minimalProvider.generateAndAnchor).toBeUndefined();
     expect(minimalProvider.generateChained).toBeUndefined();
-    expect(minimalProvider.createAnchor).toBeUndefined();
   });
 });
 ```
@@ -363,7 +374,7 @@ Expected: FAIL — `ChainAnchor` type not exported
 
 - [ ] **Step 3: Add ChainAnchor and optional methods to types.ts**
 
-Append before the `Provider` interface closing brace in `scripts/providers/types.ts`:
+Replace the entire `Provider` interface in `scripts/providers/types.ts` with:
 
 ```typescript
 // Opaque handle for provider-specific chain state
@@ -377,8 +388,13 @@ export interface Provider {
   generate(req: GenerateRequest): Promise<GenerateResult>;
 
   // Chain support (optional — provider-specific)
+  // First task: generate + create anchor in one call (no hidden contracts)
+  generateAndAnchor?(req: GenerateRequest): Promise<{
+    result: GenerateResult;
+    anchor: ChainAnchor;
+  }>;
+  // Subsequent tasks: generate using anchor
   generateChained?(req: GenerateRequest, anchor: ChainAnchor): Promise<GenerateResult>;
-  createAnchor?(firstReq: GenerateRequest, rawResponse: unknown): ChainAnchor;
 
   // Batch (optional)
   batchCreate?(req: BatchCreateRequest): Promise<BatchJob>;
@@ -532,11 +548,15 @@ Expected: FAIL — `buildChainedRequestBody` not exported
 
 - [ ] **Step 3: Write failing test for createGoogleAnchor**
 
-Append to `scripts/providers/google.test.ts`:
+Add `createGoogleAnchor` to the existing import from `"./google"` in `scripts/providers/google.test.ts`:
 
 ```typescript
 import { createGoogleAnchor } from "./google";
+```
 
+Then append:
+
+```typescript
 describe("createGoogleAnchor", () => {
   test("captures firstUserParts and raw modelContent", () => {
     const firstReq = {
@@ -570,11 +590,8 @@ describe("createGoogleAnchor", () => {
     };
 
     const anchor = createGoogleAnchor(firstReq, rawResponse);
-    // firstUserParts should match what buildRealtimeRequestBody produces
-    expect(anchor.firstUserParts).toHaveLength(1); // text part only (no refs)
+    expect(anchor.firstUserParts).toHaveLength(1);
     expect((anchor.firstUserParts[0] as any).text).toContain("first prompt");
-
-    // modelContent should be raw from API
     expect(anchor.modelContent.role).toBe("model");
     expect(anchor.modelContent.parts).toHaveLength(3);
     expect((anchor.modelContent.parts[0] as any).thoughtSignature).toBe("sig1");
@@ -597,11 +614,9 @@ export function createGoogleAnchor(
   firstReq: GenerateRequest,
   rawResponse: unknown,
 ): GoogleChainAnchor {
-  // Capture the first-turn user parts (as buildRealtimeRequestBody would produce)
   const body = buildRealtimeRequestBody(firstReq);
   const firstUserParts = body.contents[0].parts;
 
-  // Extract raw model content from API response
   const resp = rawResponse as {
     candidates?: Array<{
       content?: { role: string; parts: Array<Record<string, unknown>> };
@@ -628,7 +643,7 @@ export function buildChainedRequestBody(
     imageConfig: { imageSize: string };
   };
 } {
-  // Current user turn: task refs + prompt
+  // Current user turn: task-specific refs (NOT character refs) + prompt
   const currentParts: Array<Record<string, unknown>> = [];
   for (const refPath of req.refs) {
     const data = readFileSync(refPath);
@@ -662,39 +677,7 @@ export function buildChainedRequestBody(
 }
 ```
 
-Then update `createGoogleProvider` to expose chain methods on the returned Provider:
-
-```typescript
-// Inside createGoogleProvider, add to the returned object:
-generateChained: async (req: GenerateRequest, anchor: ChainAnchor): Promise<GenerateResult> => {
-  const googleAnchor = anchor as GoogleChainAnchor;
-  const url = `${baseUrl}/v1beta/models/${req.model}:generateContent`;
-  const body = buildChainedRequestBody(req, googleAnchor);
-
-  for (let attempt = 0; attempt <= RETRY_DELAYS.length; attempt++) {
-    const res = await httpPost(url, body, apiKey);
-
-    if (res.status === 200) {
-      return parseGenerateResponse(res.data as Parameters<typeof parseGenerateResponse>[0]);
-    }
-
-    if (!RETRYABLE_STATUS.has(res.status) || attempt === RETRY_DELAYS.length) {
-      const errData = res.data as { error?: { message?: string } };
-      const msg = errData?.error?.message ?? `HTTP ${res.status}`;
-      throw new Error(msg);
-    }
-
-    await Bun.sleep(RETRY_DELAYS[attempt]);
-  }
-  throw new Error("Unreachable");
-},
-
-createAnchor: (firstReq: GenerateRequest, rawResponse: unknown): ChainAnchor => {
-  return createGoogleAnchor(firstReq, rawResponse);
-},
-```
-
-Also refactor `generateWithRetry` to expose raw response for chain anchor creation. Add a new internal function:
+Refactor `generateWithRetry` into `generateCore` (internal) for reuse:
 
 ```typescript
 async function generateCore(
@@ -725,25 +708,50 @@ async function generateCore(
 }
 ```
 
-Update `generateWithRetry` to use `generateCore`:
+Update `generateWithRetry` and add `generateAndAnchor` + `generateChained` to the returned Provider:
 
 ```typescript
 async function generateWithRetry(req: GenerateRequest): Promise<GenerateResult> {
   const { result } = await generateCore(req);
   return result;
 }
+
+// In createGoogleProvider return object:
+return {
+  name: "google",
+  defaultModel: "gemini-3.1-flash-image-preview",
+  generate: generateWithRetry,
+
+  // Chain: first task — generate + create anchor in one call
+  async generateAndAnchor(req: GenerateRequest) {
+    const { result, rawResponse } = await generateCore(req);
+    const anchor = createGoogleAnchor(req, rawResponse);
+    return { result, anchor };
+  },
+
+  // Chain: subsequent tasks — generate using anchor
+  async generateChained(req: GenerateRequest, anchor: ChainAnchor) {
+    const googleAnchor = anchor as GoogleChainAnchor;
+    const url = `${baseUrl}/v1beta/models/${req.model}:generateContent`;
+    const body = buildChainedRequestBody(req, googleAnchor);
+
+    for (let attempt = 0; attempt <= RETRY_DELAYS.length; attempt++) {
+      const res = await httpPost(url, body, apiKey);
+      if (res.status === 200) {
+        return parseGenerateResponse(res.data as Parameters<typeof parseGenerateResponse>[0]);
+      }
+      if (!RETRYABLE_STATUS.has(res.status) || attempt === RETRY_DELAYS.length) {
+        const errData = res.data as { error?: { message?: string } };
+        throw new Error(errData?.error?.message ?? `HTTP ${res.status}`);
+      }
+      await Bun.sleep(RETRY_DELAYS[attempt]);
+    }
+    throw new Error("Unreachable");
+  },
+
+  // ... existing batch methods unchanged
+};
 ```
-
-Expose `generateCore` on the provider for chain mode (via a `generateWithRaw` method):
-
-```typescript
-// Add to returned Provider object
-generateWithRaw: async (req: GenerateRequest): Promise<{ result: GenerateResult; rawResponse: unknown }> => {
-  return generateCore(req);
-},
-```
-
-Note: `generateWithRaw` is not in the `Provider` interface — it's a Google-specific extension accessed via type casting in `generate.ts`.
 
 - [ ] **Step 5: Run tests to verify they pass**
 
@@ -765,22 +773,31 @@ git commit -m "feat(google): implement chain anchor creation, chained request bu
 - Modify: `scripts/commands/generate.ts`
 - Modify: `scripts/commands/generate.test.ts`
 
-- [ ] **Step 1: Write failing tests for character injection in loadPrompts**
+- [ ] **Step 1: Write failing tests for chain orchestration logic**
 
-Append to `scripts/commands/generate.test.ts`:
+Add imports to existing import line in `scripts/commands/generate.test.ts`:
 
 ```typescript
 import { mkdtempSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
+```
 
-describe("character integration in generate", () => {
+Then append test cases:
+
+```typescript
+describe("chain mode edge cases", () => {
   test("validateGenerateArgs allows --chain without --prompts for single prompt", () => {
-    // --chain with single --prompt should not throw (it's just ignored)
     expect(() => validateGenerateArgs({ prompt: "A cat" })).not.toThrow();
+  });
+
+  test("validateGenerateArgs still requires prompt or prompts", () => {
+    expect(() => validateGenerateArgs({})).toThrow("--prompt or --prompts is required");
   });
 });
 ```
+
+Note: Full chain orchestration tests require mocking the Provider, which is best done in the integration test (Task 8). The unit tests here verify input validation only.
 
 - [ ] **Step 2: Implement character injection and chain orchestration in generate.ts**
 
@@ -800,7 +817,7 @@ import {
 } from "../lib/output";
 import type { Config } from "../lib/config";
 import { mapQualityToImageSize } from "../providers/google";
-import { loadCharacter, applyCharacter, type CharacterProfile } from "../lib/character";
+import { loadCharacter, applyCharacterPrompt, mergeCharacterRefs, type CharacterProfile } from "../lib/character";
 
 export interface GenerateFlags {
   prompt?: string;
@@ -859,13 +876,7 @@ export function loadPrompts(
   }));
 }
 
-// Google-specific provider with raw response access
-interface GoogleProviderExtended extends Provider {
-  generateWithRaw(req: GenerateRequest): Promise<{
-    result: GenerateResult;
-    rawResponse: unknown;
-  }>;
-}
+// No hidden contracts — generateAndAnchor is in the public Provider interface
 
 export async function runGenerate(
   provider: Provider,
@@ -895,19 +906,27 @@ export async function runGenerate(
     refs: flags.ref?.map((r) => resolve(r)) ?? [],
   });
 
-  // Apply character to all tasks
+  // Apply character: prompt injection for ALL tasks, ref injection depends on chain mode
+  const useChain = flags.chain === true && tasks.length > 1;
   if (character) {
-    for (const task of tasks) {
-      const applied = applyCharacter(task.prompt, task.refs, character);
-      task.prompt = applied.prompt;
-      task.refs = applied.refs;
+    for (let i = 0; i < tasks.length; i++) {
+      // Always inject description + negative into prompt
+      tasks[i].prompt = applyCharacterPrompt(tasks[i].prompt, character);
+      // Merge character refs: always for non-chain, only first task for chain
+      if (!useChain || i === 0) {
+        tasks[i].refs = mergeCharacterRefs(tasks[i].refs, character);
+      }
+      // Chain tasks 2..N: character refs are already in anchor's firstUserParts
+      // Only task-specific refs (from prompts.json "ref" field) are sent
     }
   }
 
-  // Chain mode only applies with multiple prompts
-  const useChain = flags.chain === true && tasks.length > 1;
+  // Resolve all refs to absolute paths for consistent dedup
+  for (const task of tasks) {
+    task.refs = task.refs.map((r) => resolve(r));
+  }
+
   let anchor: ChainAnchor | undefined;
-  let anchorReq: GenerateRequest | undefined;
 
   let seq = nextSeqNumber(flags.outdir);
 
@@ -944,13 +963,12 @@ export async function runGenerate(
         continue;
       }
     } else if (useChain && isFirstTask) {
-      // First task in chain: generate with raw response for anchor
-      const googleProvider = provider as GoogleProviderExtended;
-      if (!googleProvider.generateWithRaw) {
-        throw new Error(`Provider ${provider.name} does not support chain mode (no generateWithRaw)`);
+      // First task in chain: generate + create anchor in one call
+      if (!provider.generateAndAnchor) {
+        throw new Error(`Provider ${provider.name} does not support chain mode`);
       }
-      const { result: firstResult, rawResponse } =
-        await googleProvider.generateWithRaw(req);
+      const { result: firstResult, anchor: newAnchor } =
+        await provider.generateAndAnchor(req);
       result = firstResult;
 
       // First image guard
@@ -976,12 +994,7 @@ export async function runGenerate(
         process.exit(1);
       }
 
-      // Create anchor
-      if (!provider.createAnchor) {
-        throw new Error(`Provider ${provider.name} does not support chain mode (no createAnchor)`);
-      }
-      anchor = provider.createAnchor(req, rawResponse);
-      anchorReq = req;
+      anchor = newAnchor;
     } else {
       // Normal (non-chain) generation
       result = await provider.generate(req);
@@ -1070,16 +1083,18 @@ git commit -m "feat(generate): add character injection and chain mode orchestrat
 **Files:**
 - Modify: `scripts/commands/batch.ts:76-115` (batchSubmit function)
 
-- [ ] **Step 1: Modify batchSubmit to support --character and warn on --chain**
+- [ ] **Step 1: Modify batchSubmit to support --character, warn on --chain, and add payload guardrail**
 
-In `scripts/commands/batch.ts`, update `batchSubmit`:
+In `scripts/commands/batch.ts`:
+- Add to the existing imports (merge, do NOT create duplicate import lines):
+  ```typescript
+  import { loadCharacter, applyCharacterPrompt, mergeCharacterRefs } from "../lib/character";
+  ```
+  Note: `resolve` is already imported from `"path"` on line 2.
+
+Update `batchSubmit`:
 
 ```typescript
-// At top of file, add import
-import { loadCharacter, applyCharacter } from "../lib/character";
-import { resolve } from "path";
-
-// Update batchSubmit signature to accept character and chain flags
 async function batchSubmit(
   provider: Provider,
   config: Config,
@@ -1121,9 +1136,8 @@ async function batchSubmit(
 
     // Apply character profile
     if (character) {
-      const applied = applyCharacter(prompt, refs, character);
-      prompt = applied.prompt;
-      refs = applied.refs;
+      prompt = applyCharacterPrompt(prompt, character);
+      refs = mergeCharacterRefs(refs, character);
     }
 
     return {
@@ -1136,7 +1150,25 @@ async function batchSubmit(
     };
   });
 
-  // ... rest of batchSubmit unchanged
+  // Payload estimation guardrail for character refs
+  if (character && character.references.length > 0) {
+    const refSizeBytes = character.references.reduce((sum, refPath) => {
+      return sum + readFileSync(refPath).length;
+    }, 0);
+    // Each task gets refs duplicated as base64 (~1.37x raw size)
+    const estimatedRefPayload = refSizeBytes * 1.37 * tasks.length;
+    const LIMIT = 20 * 1024 * 1024;
+    if (estimatedRefPayload > LIMIT * 0.8) {
+      throw new Error(
+        `Estimated payload (~${Math.round(estimatedRefPayload / 1024 / 1024)}MB) may exceed 20MB limit. ` +
+        `Character references (${character.references.length} files, ${Math.round(refSizeBytes / 1024)}KB each) ` +
+        `are duplicated across ${tasks.length} tasks. ` +
+        `Reduce tasks per batch or remove character references for large batches.`,
+      );
+    }
+  }
+
+  // ... rest of batchSubmit unchanged (outdir, provider.batchCreate, manifest, etc.)
 }
 ```
 
@@ -1200,12 +1232,12 @@ git commit -m "feat(main): wire --character and --chain flags to generate comman
 
 - [ ] **Step 1: Write integration test for character + chain CLI parsing end-to-end**
 
-Append to `scripts/integration.test.ts`:
+Add new imports to `scripts/integration.test.ts` (merge into existing imports — `describe`, `test`, `expect` are already imported):
 
 ```typescript
-import { describe, test, expect } from "bun:test";
+// Add these imports (do NOT duplicate existing ones)
 import { parseArgs } from "./lib/args";
-import { loadCharacter, applyCharacter } from "./lib/character";
+import { loadCharacter, applyCharacterPrompt, mergeCharacterRefs } from "./lib/character";
 import { mkdtempSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
@@ -1244,10 +1276,11 @@ describe("character + chain integration", () => {
     );
 
     const profile = loadCharacter(charPath);
-    const result = applyCharacter("in a garden", ["/task/other.png"], profile);
+    const prompt = applyCharacterPrompt("in a garden", profile);
+    const refs = mergeCharacterRefs(["/task/other.png"], profile);
 
-    expect(result.prompt).toBe("A tall woman No glasses in a garden");
-    expect(result.refs).toEqual([refPath, "/task/other.png"]);
+    expect(prompt).toBe("A tall woman No glasses in a garden");
+    expect(refs).toEqual([refPath, "/task/other.png"]);
   });
 
   test("batch args parse --character without --chain", () => {
