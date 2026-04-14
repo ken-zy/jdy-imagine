@@ -21,6 +21,16 @@ describe("validateGenerateArgs", () => {
   });
 });
 
+describe("chain mode edge cases", () => {
+  test("validateGenerateArgs allows --chain without --prompts for single prompt", () => {
+    expect(() => validateGenerateArgs({ prompt: "A cat" })).not.toThrow();
+  });
+
+  test("validateGenerateArgs still requires prompt or prompts", () => {
+    expect(() => validateGenerateArgs({})).toThrow("--prompt or --prompts is required");
+  });
+});
+
 describe("loadPrompts", () => {
   test("single prompt creates one task", () => {
     const tasks = loadPrompts({ prompt: "A cat" }, {
