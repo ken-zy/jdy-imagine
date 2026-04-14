@@ -106,6 +106,121 @@ async function fetchUploadJsonlInner(
     }
 }
 
+export async function downloadJsonl(
+  fileName: string,
+  apiKey: string,
+  baseUrl: string,
+  onLine: (line: string) => void,
+): Promise<void> {
+  const proxy = detectProxy(process.env as Record<string, string>);
+
+  const doDownload = async () => {
+    if (proxy) {
+      curlDownloadJsonl(fileName, apiKey, baseUrl, proxy, onLine);
+    } else {
+      await fetchDownloadJsonl(fileName, apiKey, baseUrl, onLine);
+    }
+  };
+
+  // Retry wrapper for download
+  await withRetry(doDownload, (err) => {
+    const e = err as { retryable?: boolean; name?: string };
+    return e.retryable === true || e.name === "AbortError" || (err instanceof TypeError);
+  }).catch((err) => {
+    // Enhance error message for known File ID length bug (googleapis/python-genai#1759)
+    if (fileName.length > 40) {
+      throw new Error(
+        `Download failed for file "${fileName}": ${(err as Error).message}. ` +
+        `Note: File ID exceeds 40 characters — this may be affected by a known Google API bug (googleapis/python-genai#1759).`,
+      );
+    }
+    throw err;
+  });
+}
+
+async function fetchDownloadJsonl(
+  fileName: string,
+  apiKey: string,
+  baseUrl: string,
+  onLine: (line: string) => void,
+): Promise<void> {
+  const url = `${baseUrl}/download/v1beta/${fileName}:download?alt=media`;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), DOWNLOAD_TIMEOUT);
+
+  try {
+    const res = await fetch(url, {
+      headers: { "x-goog-api-key": apiKey },
+      signal: controller.signal,
+    });
+
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      const status = res.status;
+      if (RETRYABLE_HTTP.has(status)) throw Object.assign(new Error(`Download failed: HTTP ${status}`), { retryable: true });
+      throw new Error(`Download failed: HTTP ${status} — ${text.slice(0, 200)}`);
+    }
+
+    // Stream response body line by line
+    const reader = res.body!.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+
+      const lines = buffer.split("\n");
+      buffer = lines.pop()!;
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (trimmed) onLine(trimmed);
+      }
+    }
+
+    // Flush remaining buffer
+    buffer += decoder.decode();
+    const trimmed = buffer.trim();
+    if (trimmed) onLine(trimmed);
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function curlDownloadJsonl(
+  fileName: string,
+  apiKey: string,
+  baseUrl: string,
+  proxy: string,
+  onLine: (line: string) => void,
+): void {
+  const url = `${baseUrl}/download/v1beta/${fileName}:download?alt=media`;
+  const output = execFileSync("curl", [
+    "-s",
+    "--connect-timeout", String(CONNECT_TIMEOUT / 1000),
+    "--max-time", String(DOWNLOAD_TIMEOUT / 1000),
+    "-x", proxy,
+    "-H", `x-goog-api-key: ${apiKey}`,
+    "-w", "\n%{http_code}",
+    url,
+  ], { encoding: "utf-8", maxBuffer: 50 * 1024 * 1024 });
+
+  const rawLines = output.trimEnd().split("\n");
+  const statusCode = parseInt(rawLines.pop()!, 10);
+  if (statusCode !== 200) {
+    if (RETRYABLE_HTTP.has(statusCode)) {
+      throw Object.assign(new Error(`Download failed: HTTP ${statusCode}`), { retryable: true });
+    }
+    throw new Error(`Download failed: HTTP ${statusCode} — ${rawLines.join("\n").slice(0, 200)}`);
+  }
+
+  for (const line of rawLines) {
+    const trimmed = line.trim();
+    if (trimmed) onLine(trimmed);
+  }
+}
+
 function curlUploadJsonl(
   data: Uint8Array,
   displayName: string,
