@@ -392,10 +392,35 @@ describe("createGoogleAnchor", () => {
     };
 
     const anchor = createGoogleAnchor(firstReq, rawResponse);
-    expect(anchor.firstUserParts).toHaveLength(1);
-    expect((anchor.firstUserParts[0] as any).text).toContain("first prompt");
-    expect(anchor.modelContent.role).toBe("model");
-    expect(anchor.modelContent.parts).toHaveLength(3);
-    expect((anchor.modelContent.parts[0] as any).thoughtSignature).toBe("sig1");
+    expect(anchor).not.toBeNull();
+    expect(anchor!.firstUserParts).toHaveLength(1);
+    expect((anchor!.firstUserParts[0] as any).text).toContain("first prompt");
+    expect(anchor!.modelContent.role).toBe("model");
+    expect(anchor!.modelContent.parts).toHaveLength(3);
+    expect((anchor!.modelContent.parts[0] as any).thoughtSignature).toBe("sig1");
+  });
+
+  test("returns null when SAFETY block has no model content", () => {
+    const firstReq = {
+      prompt: "blocked prompt",
+      model: "test",
+      ar: null as string | null,
+      quality: "2k" as const,
+      refs: [],
+      imageSize: "2K" as const,
+    };
+
+    // SAFETY response: candidate exists but no content
+    const rawResponse = {
+      candidates: [
+        {
+          finishReason: "SAFETY",
+          safetyRatings: [{ category: "HARM_CATEGORY_DANGEROUS_CONTENT", probability: "HIGH" }],
+        },
+      ],
+    };
+
+    const anchor = createGoogleAnchor(firstReq, rawResponse);
+    expect(anchor).toBeNull();
   });
 });
