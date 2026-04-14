@@ -21,7 +21,7 @@
 ```typescript
 // scripts/lib/character.test.ts
 import { describe, test, expect } from "bun:test";
-import { loadCharacter, applyCharacter } from "./character";
+import { loadCharacter, applyCharacterPrompt, mergeCharacterRefs } from "./character";
 import { mkdtempSync, writeFileSync, mkdirSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
@@ -204,7 +204,7 @@ Expected: All 6 tests PASS
 
 ```bash
 git add scripts/lib/character.ts scripts/lib/character.test.ts
-git commit -m "feat(character): add CharacterProfile module with loadCharacter and applyCharacter"
+git commit -m "feat(character): add CharacterProfile module with loadCharacter, applyCharacterPrompt, and mergeCharacterRefs"
 ```
 
 ---
@@ -906,6 +906,11 @@ export async function runGenerate(
     refs: flags.ref?.map((r) => resolve(r)) ?? [],
   });
 
+  // Resolve all refs to absolute paths FIRST (before dedup in mergeCharacterRefs)
+  for (const task of tasks) {
+    task.refs = task.refs.map((r) => resolve(r));
+  }
+
   // Apply character: prompt injection for ALL tasks, ref injection depends on chain mode
   const useChain = flags.chain === true && tasks.length > 1;
   if (character) {
@@ -919,11 +924,6 @@ export async function runGenerate(
       // Chain tasks 2..N: character refs are already in anchor's firstUserParts
       // Only task-specific refs (from prompts.json "ref" field) are sent
     }
-  }
-
-  // Resolve all refs to absolute paths for consistent dedup
-  for (const task of tasks) {
-    task.refs = task.refs.map((r) => resolve(r));
   }
 
   let anchor: ChainAnchor | undefined;
@@ -1150,20 +1150,28 @@ async function batchSubmit(
     };
   });
 
-  // Payload estimation guardrail for character refs
-  if (character && character.references.length > 0) {
-    const refSizeBytes = character.references.reduce((sum, refPath) => {
-      return sum + readFileSync(refPath).length;
-    }, 0);
-    // Each task gets refs duplicated as base64 (~1.37x raw size)
-    const estimatedRefPayload = refSizeBytes * 1.37 * tasks.length;
+  // Payload estimation guardrail (total: character refs + task refs + prompts per task)
+  {
+    const BASE64_OVERHEAD = 1.37;
+    const JSON_OVERHEAD_PER_TASK = 512; // JSON structure, metadata keys, etc.
+    let totalEstimate = 0;
+    for (const task of tasks) {
+      // Refs for this task (includes character refs if merged)
+      let taskRefBytes = 0;
+      for (const refPath of task.refs) {
+        taskRefBytes += readFileSync(refPath).length;
+      }
+      totalEstimate += taskRefBytes * BASE64_OVERHEAD;
+      totalEstimate += Buffer.byteLength(task.prompt, "utf-8");
+      totalEstimate += JSON_OVERHEAD_PER_TASK;
+    }
     const LIMIT = 20 * 1024 * 1024;
-    if (estimatedRefPayload > LIMIT * 0.8) {
+    if (totalEstimate > LIMIT) {
+      const charRefNote = character
+        ? ` Character references are duplicated across all ${tasks.length} tasks — consider removing them or reducing tasks per batch.`
+        : "";
       throw new Error(
-        `Estimated payload (~${Math.round(estimatedRefPayload / 1024 / 1024)}MB) may exceed 20MB limit. ` +
-        `Character references (${character.references.length} files, ${Math.round(refSizeBytes / 1024)}KB each) ` +
-        `are duplicated across ${tasks.length} tasks. ` +
-        `Reduce tasks per batch or remove character references for large batches.`,
+        `Estimated batch payload (~${Math.round(totalEstimate / 1024 / 1024)}MB) exceeds 20MB limit.${charRefNote}`,
       );
     }
   }
@@ -1293,6 +1301,101 @@ describe("character + chain integration", () => {
     ]);
     expect(args.flags.character).toBe("char.json");
     expect(args.flags.chain).toBe(false);
+  });
+});
+
+describe("chain orchestration with fake provider", () => {
+  test("first task calls generateAndAnchor, subsequent call generateChained", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "chain-orch-"));
+    const promptsPath = join(dir, "prompts.json");
+    writeFileSync(
+      promptsPath,
+      JSON.stringify([
+        { prompt: "standing portrait" },
+        { prompt: "outdoor scene" },
+      ]),
+    );
+
+    const calls: string[] = [];
+    const fakeImage = {
+      data: new Uint8Array([0x89, 0x50]),
+      mimeType: "image/png",
+    };
+    const fakeResult = { images: [fakeImage], finishReason: "STOP" as const };
+    const fakeAnchor = { fake: true };
+
+    const fakeProvider = {
+      name: "fake",
+      defaultModel: "fake-model",
+      generate: async () => {
+        calls.push("generate");
+        return fakeResult;
+      },
+      generateAndAnchor: async () => {
+        calls.push("generateAndAnchor");
+        return { result: fakeResult, anchor: fakeAnchor };
+      },
+      generateChained: async () => {
+        calls.push("generateChained");
+        return fakeResult;
+      },
+    };
+
+    const { runGenerate } = await import("./commands/generate");
+    await runGenerate(fakeProvider as any, {
+      provider: "fake",
+      model: "fake-model",
+      quality: "normal" as const,
+      ar: "1:1",
+      apiKey: "fake",
+      baseUrl: "http://fake",
+    }, {
+      prompts: promptsPath,
+      outdir: dir,
+      json: true,
+      chain: true,
+    });
+
+    expect(calls).toEqual(["generateAndAnchor", "generateChained"]);
+  });
+
+  test("chain aborts if first image returns zero images", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "chain-fail-"));
+    const promptsPath = join(dir, "prompts.json");
+    writeFileSync(
+      promptsPath,
+      JSON.stringify([
+        { prompt: "first" },
+        { prompt: "second" },
+      ]),
+    );
+
+    const fakeProvider = {
+      name: "fake",
+      defaultModel: "fake-model",
+      generate: async () => ({ images: [], finishReason: "SAFETY" as const }),
+      generateAndAnchor: async () => ({
+        result: { images: [], finishReason: "SAFETY" as const },
+        anchor: {},
+      }),
+      generateChained: async () => ({ images: [], finishReason: "STOP" as const }),
+    };
+
+    const { runGenerate } = await import("./commands/generate");
+    // Should call process.exit(1) — we test by catching
+    const originalExit = process.exit;
+    let exitCode: number | undefined;
+    process.exit = ((code: number) => { exitCode = code; }) as any;
+    try {
+      await runGenerate(fakeProvider as any, {
+        provider: "fake", model: "fake", quality: "normal" as const,
+        ar: "1:1", apiKey: "fake", baseUrl: "http://fake",
+      }, {
+        prompts: promptsPath, outdir: dir, json: true, chain: true,
+      });
+    } catch { /* ignore */ }
+    process.exit = originalExit;
+    expect(exitCode).toBe(1);
   });
 });
 ```
