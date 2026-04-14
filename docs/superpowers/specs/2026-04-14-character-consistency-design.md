@@ -48,7 +48,7 @@ Combined, these provide the best consistency: character bible locks semantic ide
 | Realtime | Injected into prompt | Merged into refs |
 | Batch | Injected into prompt | Merged into refs |
 
-Character profile is fully transparent to both modes.
+Character profile is transparent to both modes. However, batch mode with character references compounds the existing 20MB inline payload limit: each task gets character refs duplicated as base64. The CLI must estimate total payload before submission and error early if character refs + task refs + prompts would exceed the limit. The error message should suggest reducing the number of tasks per batch or removing character references from large batches.
 
 ### Module: `scripts/lib/character.ts`
 
@@ -87,55 +87,70 @@ Task 3: [prompt_1, image_1, prompt_3] → image_3
 
 Payload size is fixed per request (one extra image), and consistency is stable (no accumulated drift).
 
-### ConversationTurn Type
+### Architecture: Provider-Internal Chain State
+
+Chain state is **not** exposed in the provider-level `GenerateRequest` interface. Multi-turn conversation is a Google-specific concern that requires preserving raw API response parts (including `thoughtSignature` — see below). Putting a generic `history` field in the Provider interface would be a premature abstraction with the wrong shape.
+
+Instead, chain mode is implemented as follows:
+
+1. **`generate.ts`** orchestrates the chain: calls `provider.generate()` for the first task, then calls a new Google-specific method `provider.generateChained()` for subsequent tasks.
+2. **`google.ts`** owns the chain state internally: it preserves the raw first-turn request parts and raw model response parts (including `thoughtSignature`), and constructs multi-turn `contents` from them.
+3. **`Provider` interface** gains one optional method: `generateChained?(req: GenerateRequest, anchor: ChainAnchor): Promise<GenerateResult>`, where `ChainAnchor` is an opaque type returned by the provider.
+
+### Thought Signatures
+
+Gemini 3.x models return `thoughtSignature` fields on model response parts. These are cryptographically signed snapshots of the model's reasoning state. For multi-turn image editing, **all thought signatures from the previous model turn must be sent back verbatim** — missing them causes a 400 error.
+
+Current `parseGenerateResponse` strips all part-level metadata, keeping only `images[]` and `textParts[]`. For chain mode, the Google provider must additionally preserve the **raw model response parts** (the entire `candidates[0].content` object) to replay them in subsequent requests.
+
+### Chain State Type (Google-internal)
 
 ```typescript
-// Added to types.ts
-interface ConversationTurn {
-  role: "user" | "model";
-  parts: Array<{
-    text?: string;
-    imageData?: { data: string; mimeType: string };
-  }>;
+// In google.ts, NOT in types.ts
+interface GoogleChainAnchor {
+  // Raw first-turn user parts as sent to the API (includes inlineData refs + text)
+  firstUserParts: Array<Record<string, unknown>>;
+  // Raw model response content from first turn (includes thoughtSignature, inlineData, text)
+  modelContent: { role: string; parts: Array<Record<string, unknown>> };
 }
 ```
 
-`GenerateRequest` gains an optional field:
+### Opaque Anchor in Provider Interface
 
 ```typescript
-interface GenerateRequest {
-  // ...existing fields
-  history?: ConversationTurn[];
+// In types.ts — opaque handle, provider-specific internals hidden
+type ChainAnchor = unknown;
+
+interface Provider {
+  // ...existing methods
+
+  // Chain support (optional)
+  generateChained?(req: GenerateRequest, anchor: ChainAnchor): Promise<GenerateResult>;
+  createAnchor?(firstReq: GenerateRequest, rawResponse: unknown): ChainAnchor;
 }
 ```
 
-### Anchor Construction
+`generate.ts` calls `provider.generate()` for the first task, then `provider.createAnchor()` to capture the anchor from the raw response, then `provider.generateChained()` for subsequent tasks. The anchor is opaque to the orchestrator.
 
-After the first image is generated successfully:
+### Raw Response Preservation
+
+To support `createAnchor`, the Google provider's `generate()` method must return the raw API response alongside the parsed `GenerateResult`. Implementation approach: `generate()` continues to return `GenerateResult` as before. A separate internal method captures the raw response for anchor creation. Specifically:
 
 ```typescript
-anchorHistory = [
-  {
-    role: "user",
-    parts: [{ text: firstTask.prompt }],  // text only, no binary refs
-  },
-  {
-    role: "model",
-    parts: [{
-      imageData: {
-        data: base64(firstResult.images[0].data),
-        mimeType: firstResult.images[0].mimeType,
-      },
-    }],
-  },
-];
+// Google provider internal
+async function generateWithRaw(req: GenerateRequest): Promise<{
+  result: GenerateResult;
+  rawResponse: unknown;  // full API response JSON
+}>;
 ```
 
-The anchor's user turn contains only the text prompt — ref images are not stored in history. When `buildRealtimeRequestBody` constructs the actual API request, it re-reads ref images from disk and inserts them as `inlineData` parts in the first user turn. This avoids duplicating large binary data in memory while ensuring the API request includes the full visual context. The model turn contains the first generated image as base64.
+`generate()` wraps `generateWithRaw()` and returns only `result`. When chain mode is active, `generate.ts` calls `generateWithRaw()` directly for the first task (via a provider-specific cast), then passes `rawResponse` to `createAnchor()`.
 
-### Request Construction with History
+Alternative (cleaner): `createAnchor` is called with the `GenerateRequest` and the provider re-sends a lightweight probe. But this wastes an API call. The `generateWithRaw` approach is preferred despite the slightly awkward cast.
 
-When `req.history` is present, `buildRealtimeRequestBody` in `google.ts` constructs multi-turn contents:
+### Request Construction with Anchor
+
+When `generateChained` is called, Google provider constructs multi-turn contents:
 
 ```json
 {
@@ -150,7 +165,9 @@ When `req.history` is present, `buildRealtimeRequestBody` in `google.ts` constru
     {
       "role": "model",
       "parts": [
-        { "inlineData": { "data": "<anchor_image_base64>", "mimeType": "image/png" } }
+        { "thoughtSignature": "<base64_signature>" },
+        { "inlineData": { "data": "<anchor_image_base64>", "mimeType": "image/png" } },
+        { "thoughtSignature": "<base64_signature_2>" }
       ]
     },
     {
@@ -163,22 +180,31 @@ When `req.history` is present, `buildRealtimeRequestBody` in `google.ts` constru
 ```
 
 Key details:
-- Character refs (inlineData) only appear in the first user turn
+- The model turn is the **raw preserved content** from the first generation, including all `thoughtSignature` fields in their original positions
+- Character refs (inlineData) only appear in the first user turn (from `firstUserParts`)
 - Character description is injected in every user turn (reinforces identity)
-- The anchor model turn contains only the generated base image
+- The first user turn is reconstructed from `GoogleChainAnchor.firstUserParts`
+
+### First Image Guard
+
+Chain mode requires exactly one image from the first generation to establish a clear anchor. If the first task returns zero images (safety block, text-only response) or multiple images, chain mode aborts with an error:
+
+- Zero images: `"Chain aborted: first image generation failed (safety/no-image)"`
+- Multiple images: `"Chain aborted: first task returned multiple images, cannot determine anchor. Use a more specific prompt for the first task."`
 
 ### Error Handling
 
 | Scenario | Behavior |
 |----------|----------|
 | First image fails (safety/no-image) | Chain aborted, exit with error |
+| First image returns multiple images | Chain aborted, exit with error |
 | Subsequent image fails | Skip task, log warning, continue to next |
 | `--chain` without `--prompts` | Ignored (single prompt, nothing to chain) |
 | `--chain` with `batch` | Warning printed, flag ignored |
 
 ### Payload Size
 
-Star mode per-request overhead = base anchor image base64 size. At 2K resolution, PNG is approximately 2-4MB base64. Combined with character refs and prompt text, a single request totals approximately 5-8MB — well within Gemini's per-request limit.
+Star mode per-request overhead = raw anchor model content size (includes base64 image + thought signatures). At 2K resolution, this is approximately 3-5MB. Combined with character refs and prompt text, a single request totals approximately 6-10MB — within Gemini's per-request limit but larger than non-chain requests.
 
 ## CLI Changes
 
@@ -211,10 +237,10 @@ bun scripts/main.ts batch submit prompts.json --character model-a.json
 |------|--------|
 | `scripts/lib/character.ts` | **New** — CharacterProfile type, loadCharacter, applyCharacter |
 | `scripts/lib/args.ts` | Add `--chain` and `--character` flag parsing |
-| `scripts/providers/types.ts` | Add ConversationTurn type, history field to GenerateRequest |
-| `scripts/providers/google.ts` | buildRealtimeRequestBody supports history → multi-turn contents |
-| `scripts/commands/generate.ts` | Chain orchestration + character injection |
-| `scripts/commands/batch.ts` | Character injection + chain warning |
+| `scripts/providers/types.ts` | Add `ChainAnchor` opaque type, `generateChained?` and `createAnchor?` optional methods to Provider |
+| `scripts/providers/google.ts` | Add `GoogleChainAnchor` type, `generateWithRaw`, implement `generateChained` and `createAnchor`; preserve raw response parts including `thoughtSignature` |
+| `scripts/commands/generate.ts` | Chain orchestration (first-image guard, anchor creation, chained generation) + character injection |
+| `scripts/commands/batch.ts` | Character injection + `--chain` warning + payload estimation guardrail for character refs |
 | `scripts/main.ts` | Pass new flags through |
 
 ## What's NOT in This Version
@@ -222,5 +248,6 @@ bun scripts/main.ts batch submit prompts.json --character model-a.json
 - Sequential chain mode (accumulated history) — star mode only
 - Group-based chaining within prompts.json
 - Automatic anchor quality evaluation (user must verify first image manually)
-- Chain mode for batch (API limitation)
+- Chain mode for batch (API limitation — each batch request is independent)
 - Character profile in EXTEND.md (always explicit via `--character` flag)
+- Batch File API submission (would alleviate 20MB limit with character refs)
