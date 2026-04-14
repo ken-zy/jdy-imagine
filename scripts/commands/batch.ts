@@ -7,6 +7,8 @@ import { generateSlug, ensureOutdir, writeImage, mimeToExt } from "../lib/output
 import { mapQualityToImageSize } from "../providers/google";
 import { loadCharacter, applyCharacterPrompt, mergeCharacterRefs } from "../lib/character";
 
+export const BATCH_PAYLOAD_LIMIT = 100 * 1024 * 1024;
+
 export interface BatchManifest {
   jobId: string;
   model: string;
@@ -144,13 +146,12 @@ async function batchSubmit(
       totalEstimate += Buffer.byteLength(task.prompt, "utf-8");
       totalEstimate += JSON_OVERHEAD_PER_TASK;
     }
-    const LIMIT = 20 * 1024 * 1024;
-    if (totalEstimate > LIMIT) {
+    if (totalEstimate > BATCH_PAYLOAD_LIMIT) {
       const charRefNote = character
         ? ` Character references are duplicated across all ${tasks.length} tasks — consider removing them or reducing tasks per batch.`
         : "";
       throw new Error(
-        `Estimated batch payload (~${Math.round(totalEstimate / 1024 / 1024)}MB) exceeds 20MB limit.${charRefNote}`,
+        `Estimated batch payload (~${Math.round(totalEstimate / 1024 / 1024)}MB) exceeds 100MB limit.${charRefNote}`,
       );
     }
   }
