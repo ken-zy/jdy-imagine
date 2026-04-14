@@ -331,7 +331,11 @@ async function fetchUploadJsonl(
     } finally {
       clearTimeout(timeout2);
     }
-  }, (err) => (err as { retryable?: boolean }).retryable === true);
+  }, (err) => {
+    const e = err as { retryable?: boolean; name?: string };
+    // Retry on explicit retryable flag (HTTP 429/500/503) or network errors
+    return e.retryable === true || e.name === "AbortError" || (err instanceof TypeError);
+  });
 }
 
 function curlUploadJsonl(
@@ -500,10 +504,29 @@ export async function downloadJsonl(
   onLine: (line: string) => void,
 ): Promise<void> {
   const proxy = detectProxy(process.env as Record<string, string>);
-  if (proxy) {
-    return curlDownloadJsonl(fileName, apiKey, baseUrl, proxy, onLine);
-  }
-  return fetchDownloadJsonl(fileName, apiKey, baseUrl, onLine);
+
+  const doDownload = async () => {
+    if (proxy) {
+      curlDownloadJsonl(fileName, apiKey, baseUrl, proxy, onLine);
+    } else {
+      await fetchDownloadJsonl(fileName, apiKey, baseUrl, onLine);
+    }
+  };
+
+  // Retry wrapper for download
+  await withRetry(doDownload, (err) => {
+    const e = err as { retryable?: boolean; name?: string; message?: string };
+    return e.retryable === true || e.name === "AbortError" || (err instanceof TypeError);
+  }).catch((err) => {
+    // Enhance error message for known File ID length bug (googleapis/python-genai#1759)
+    if (fileName.length > 40) {
+      throw new Error(
+        `Download failed for file "${fileName}": ${(err as Error).message}. ` +
+        `Note: File ID exceeds 40 characters — this may be affected by a known Google API bug (googleapis/python-genai#1759).`,
+      );
+    }
+    throw err;
+  });
 }
 
 async function fetchDownloadJsonl(
@@ -524,7 +547,9 @@ async function fetchDownloadJsonl(
 
     if (!res.ok) {
       const text = await res.text().catch(() => "");
-      throw new Error(`Download failed: HTTP ${res.status} — ${text.slice(0, 200)}`);
+      const status = res.status;
+      if (RETRYABLE_HTTP.has(status)) throw Object.assign(new Error(`Download failed: HTTP ${status}`), { retryable: true });
+      throw new Error(`Download failed: HTTP ${status} — ${text.slice(0, 200)}`);
     }
 
     // Stream response body line by line
@@ -572,13 +597,16 @@ function curlDownloadJsonl(
     url,
   ], { encoding: "utf-8", maxBuffer: 50 * 1024 * 1024 });
 
-  const lines = output.trimEnd().split("\n");
-  const statusCode = parseInt(lines.pop()!, 10);
+  const rawLines = output.trimEnd().split("\n");
+  const statusCode = parseInt(rawLines.pop()!, 10);
   if (statusCode !== 200) {
-    throw new Error(`Download failed: HTTP ${statusCode} — ${lines.join("\n").slice(0, 200)}`);
+    if (RETRYABLE_HTTP.has(statusCode)) {
+      throw Object.assign(new Error(`Download failed: HTTP ${statusCode}`), { retryable: true });
+    }
+    throw new Error(`Download failed: HTTP ${statusCode} — ${rawLines.join("\n").slice(0, 200)}`);
   }
 
-  for (const line of lines) {
+  for (const line of rawLines) {
     const trimmed = line.trim();
     if (trimmed) onLine(trimmed);
   }
@@ -910,7 +938,16 @@ git commit -m "feat(google): add parseJsonlResultLine for file-based results"
 
 - [ ] **Step 1: Write the failing test**
 
-Add to `scripts/providers/google.test.ts`. This is an integration-style test that mocks fetch to verify the new flow:
+Add to `scripts/providers/google.test.ts`. **First, update the import line** at the top of the file from:
+```typescript
+import { describe, test, expect } from "bun:test";
+```
+to:
+```typescript
+import { describe, test, expect, mock, afterEach } from "bun:test";
+```
+
+Then add the test:
 
 ```typescript
 import { createGoogleProvider } from "./google";
@@ -1362,28 +1399,38 @@ git commit -m "feat(google): rewire batchFetch to download JSONL with completene
 
 - [ ] **Step 1: Write the failing test**
 
-Add to `scripts/commands/batch.test.ts` (or verify existing tests still pass with the new threshold). The key change is that the 20MB limit should become 100MB:
+The payload threshold constant is embedded inside `batchSubmit()`, but we can extract it to test. First, extract the constant. Add to `scripts/commands/batch.ts` (at module level, before `batchSubmit`):
 
 ```typescript
+export const BATCH_PAYLOAD_LIMIT = 100 * 1024 * 1024; // 100MB — file-based input supports up to 2GB
+```
+
+Then add to `scripts/commands/batch.test.ts`:
+
+```typescript
+import { BATCH_PAYLOAD_LIMIT } from "./batch";
+
 describe("payload estimation", () => {
-  test("allows payloads up to 100MB", () => {
-    // This is a behavioral test: previously 20MB+ would throw, now only 100MB+ should.
-    // We just verify the threshold constant in a snapshot-style test.
-    // The actual constant is inside batchSubmit, so we test indirectly through the error message.
-    // For now, verify existing tests still pass after the threshold change.
+  test("payload limit is 100MB for file-based input", () => {
+    expect(BATCH_PAYLOAD_LIMIT).toBe(100 * 1024 * 1024);
+  });
+
+  test("error message references 100MB limit", () => {
+    // Verify the threshold isn't accidentally reverted to 20MB
+    expect(BATCH_PAYLOAD_LIMIT).toBeGreaterThan(20 * 1024 * 1024);
   });
 });
 ```
 
-Note: The payload estimation is embedded inside `batchSubmit()` which is hard to unit-test directly. The main goal is to update the threshold and verify existing tests don't break.
+Run: `bun test scripts/commands/batch.test.ts`
+Expected: FAIL — `BATCH_PAYLOAD_LIMIT` not exported.
 
 - [ ] **Step 2: Update the threshold**
 
 In `scripts/commands/batch.ts`, change lines 147-153:
 
 ```typescript
-    const LIMIT = 100 * 1024 * 1024; // file-based input supports up to 2GB; 100MB soft limit
-    if (totalEstimate > LIMIT) {
+    if (totalEstimate > BATCH_PAYLOAD_LIMIT) {
       const charRefNote = character
         ? ` Character references are duplicated across all ${tasks.length} tasks — consider removing them or reducing tasks per batch.`
         : "";
@@ -1430,7 +1477,27 @@ Spot-check:
 - `buildBatchRequestBody` is still referenced by existing tests — left in place
 - `parseBatchResponse` is still used in inline fallback path
 
-- [ ] **Step 4: Commit any cleanup**
+- [ ] **Step 4: End-to-end smoke test (manual, requires API key)**
+
+Create a minimal prompts file:
+```bash
+echo '[{"prompt": "A simple red circle on white background"}]' > /tmp/e2e-batch-test.json
+```
+
+Run:
+```bash
+bun scripts/main.ts batch submit /tmp/e2e-batch-test.json --outdir /tmp/e2e-batch-out
+```
+
+Verify:
+- Job submits successfully (JSONL upload + batch create)
+- Polling completes with "succeeded" state
+- Result JSONL downloads and parses
+- Image file written to `/tmp/e2e-batch-out/001-*.png`
+
+If API key unavailable, skip this step and document as "manual verification pending".
+
+- [ ] **Step 5: Commit any cleanup**
 
 If any cleanup was needed:
 ```bash
