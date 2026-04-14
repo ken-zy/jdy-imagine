@@ -616,3 +616,51 @@ describe("batchCreate (file-based)", () => {
     expect(batchBody.batch.input_config.requests).toBeUndefined();
   });
 });
+
+describe("batchGet (file-based)", () => {
+  const originalFetch = globalThis.fetch;
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  test("extracts responsesFile from succeeded job", async () => {
+    globalThis.fetch = (async () => {
+      return new Response(JSON.stringify({
+        name: "batches/job1",
+        metadata: {
+          state: "JOB_STATE_SUCCEEDED",
+          createTime: "2026-04-14T00:00:00Z",
+          totalCount: 4,
+          succeededCount: 4,
+          failedCount: 0,
+        },
+        response: {
+          responsesFile: "files/output456",
+        },
+      }), { status: 200 });
+    }) as typeof fetch;
+
+    const provider = createGoogleProvider("fake-key", "https://generativelanguage.googleapis.com");
+    const job = await provider.batchGet!("batches/job1");
+
+    expect(job.state).toBe("succeeded");
+    expect(job.responsesFile).toBe("files/output456");
+    expect(job.stats?.total).toBe(4);
+  });
+
+  test("returns undefined responsesFile for pending job", async () => {
+    globalThis.fetch = (async () => {
+      return new Response(JSON.stringify({
+        name: "batches/job1",
+        metadata: { state: "JOB_STATE_PENDING", createTime: "2026-04-14T00:00:00Z" },
+      }), { status: 200 });
+    }) as typeof fetch;
+
+    const provider = createGoogleProvider("fake-key", "https://generativelanguage.googleapis.com");
+    const job = await provider.batchGet!("batches/job1");
+
+    expect(job.state).toBe("pending");
+    expect(job.responsesFile).toBeUndefined();
+  });
+});

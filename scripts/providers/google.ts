@@ -515,10 +515,14 @@ export function createGoogleProvider(
           succeededCount?: number;
           failedCount?: number;
         };
+        response?: {
+          responsesFile?: string;
+          inlinedResponses?: unknown[];
+        };
       };
       return {
         id: data.name ?? jobId,
-        state: (data.metadata?.state?.toLowerCase() ?? "pending") as BatchJob["state"],
+        state: (data.metadata?.state?.toLowerCase().replace(/^(job_state_|batch_state_)/, "") ?? "pending") as BatchJob["state"],
         createTime: data.metadata?.createTime ?? "",
         stats: data.metadata?.totalCount != null
           ? {
@@ -527,6 +531,7 @@ export function createGoogleProvider(
               failed: data.metadata.failedCount ?? 0,
             }
           : undefined,
+        responsesFile: data.response?.responsesFile,
       };
     },
 
@@ -560,7 +565,7 @@ export function createGoogleProvider(
       };
       return (data.batches ?? []).map((b) => ({
         id: b.name ?? "",
-        state: (b.metadata?.state?.toLowerCase() ?? "pending") as BatchJob["state"],
+        state: (b.metadata?.state?.toLowerCase().replace(/^(job_state_|batch_state_)/, "") ?? "pending") as BatchJob["state"],
         createTime: b.metadata?.createTime ?? "",
       }));
     },
