@@ -293,6 +293,43 @@ export function parseBatchResponse(apiResponse: {
   });
 }
 
+export function parseJsonlResultLine(line: string): BatchResult | null {
+  if (!line.trim()) return null;
+
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = JSON.parse(line);
+  } catch {
+    console.error(`Warning: Failed to parse JSONL line: ${line.slice(0, 100)}`);
+    return null;
+  }
+
+  const key = (parsed.key as string) ?? "unknown";
+
+  // Top-level error
+  if (parsed.error) {
+    const errObj = parsed.error as { message?: string };
+    return { key, error: errObj.message ?? "Unknown error" };
+  }
+
+  // Response with error
+  const response = parsed.response as Record<string, unknown> | undefined;
+  if (response?.error) {
+    const errObj = response.error as { message?: string };
+    return { key, error: errObj.message ?? "Unknown error" };
+  }
+
+  // Successful response
+  if (response) {
+    const result = parseGenerateResponse(
+      response as Parameters<typeof parseGenerateResponse>[0],
+    );
+    return { key, result };
+  }
+
+  return { key, error: "No response in result line" };
+}
+
 const RETRY_DELAYS = [1000, 2000, 4000];
 const RETRYABLE_STATUS = new Set([429, 500, 503]);
 

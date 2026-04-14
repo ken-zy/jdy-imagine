@@ -8,6 +8,8 @@ import {
   validateBatchTasks,
   buildChainedRequestBody,
   createGoogleAnchor,
+  buildBatchJsonl,
+  parseJsonlResultLine,
 } from "./google";
 
 describe("mapQualityToImageSize", () => {
@@ -422,5 +424,66 @@ describe("createGoogleAnchor", () => {
 
     const anchor = createGoogleAnchor(firstReq, rawResponse);
     expect(anchor).toBeNull();
+  });
+});
+
+describe("parseJsonlResultLine", () => {
+  test("parses successful result line", () => {
+    const line = JSON.stringify({
+      key: "001-cat",
+      response: {
+        candidates: [{
+          content: {
+            parts: [{
+              inlineData: {
+                data: Buffer.from("img").toString("base64"),
+                mimeType: "image/png",
+              },
+            }],
+          },
+          finishReason: "STOP",
+        }],
+      },
+    });
+
+    const result = parseJsonlResultLine(line);
+    expect(result).not.toBeNull();
+    expect(result!.key).toBe("001-cat");
+    expect(result!.result?.images).toHaveLength(1);
+  });
+
+  test("parses error result line", () => {
+    const line = JSON.stringify({
+      key: "002-fail",
+      error: { message: "Content blocked" },
+    });
+
+    const result = parseJsonlResultLine(line);
+    expect(result).not.toBeNull();
+    expect(result!.key).toBe("002-fail");
+    expect(result!.error).toBe("Content blocked");
+  });
+
+  test("returns null for malformed JSON", () => {
+    const result = parseJsonlResultLine("not-json{{{");
+    expect(result).toBeNull();
+  });
+
+  test("returns null for empty line", () => {
+    const result = parseJsonlResultLine("");
+    expect(result).toBeNull();
+  });
+
+  test("handles line with response.error (API error)", () => {
+    const line = JSON.stringify({
+      key: "003-err",
+      response: {
+        error: { message: "Internal error" },
+      },
+    });
+
+    const result = parseJsonlResultLine(line);
+    expect(result!.key).toBe("003-err");
+    expect(result!.error).toBe("Internal error");
   });
 });
