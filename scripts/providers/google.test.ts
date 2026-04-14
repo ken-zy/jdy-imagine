@@ -6,6 +6,8 @@ import {
   buildBatchRequestBody,
   parseBatchResponse,
   validateBatchTasks,
+  buildChainedRequestBody,
+  createGoogleAnchor,
 } from "./google";
 
 describe("mapQualityToImageSize", () => {
@@ -246,5 +248,154 @@ describe("parseBatchResponse", () => {
     };
     const results = parseBatchResponse(apiResponse);
     expect(results[0].error).toBe("Content blocked");
+  });
+});
+
+describe("buildChainedRequestBody", () => {
+  test("constructs multi-turn contents with anchor", () => {
+    const anchor = {
+      firstUserParts: [
+        { text: "character desc + first prompt. Aspect ratio: 1:1." },
+      ],
+      modelContent: {
+        role: "model",
+        parts: [
+          { thoughtSignature: "abc123" },
+          {
+            inlineData: {
+              data: Buffer.from("anchor-img").toString("base64"),
+              mimeType: "image/png",
+            },
+          },
+        ],
+      },
+    };
+
+    const body = buildChainedRequestBody(
+      {
+        prompt: "second prompt",
+        model: "test",
+        ar: null,
+        quality: "2k",
+        refs: [],
+        imageSize: "2K",
+      },
+      anchor,
+    );
+
+    // Should have 3 content entries: first user, model, current user
+    expect(body.contents).toHaveLength(3);
+    expect(body.contents[0].role).toBe("user");
+    expect(body.contents[0].parts).toEqual(anchor.firstUserParts);
+    expect(body.contents[1].role).toBe("model");
+    expect(body.contents[1].parts).toEqual(anchor.modelContent.parts);
+    expect(body.contents[2].role).toBe("user");
+    expect(body.contents[2].parts).toHaveLength(1);
+    expect((body.contents[2].parts[0] as any).text).toBe("second prompt");
+  });
+
+  test("includes current task refs in last user turn", () => {
+    const { mkdtempSync, writeFileSync } = require("fs");
+    const { join } = require("path");
+    const { tmpdir } = require("os");
+    const dir = mkdtempSync(join(tmpdir(), "chain-ref-"));
+    const refPath = join(dir, "garment.png");
+    writeFileSync(refPath, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+
+    const anchor = {
+      firstUserParts: [{ text: "first prompt" }],
+      modelContent: {
+        role: "model",
+        parts: [
+          {
+            inlineData: {
+              data: Buffer.from("img").toString("base64"),
+              mimeType: "image/png",
+            },
+          },
+        ],
+      },
+    };
+
+    const body = buildChainedRequestBody(
+      {
+        prompt: "wear this garment",
+        model: "test",
+        ar: null,
+        quality: "2k",
+        refs: [refPath],
+        imageSize: "2K",
+      },
+      anchor,
+    );
+
+    const lastUserParts = body.contents[2].parts;
+    // First part: inlineData (ref), second part: text
+    expect(lastUserParts).toHaveLength(2);
+    expect(lastUserParts[0]).toHaveProperty("inlineData");
+    expect((lastUserParts[1] as any).text).toBe("wear this garment");
+  });
+
+  test("appends aspect ratio to current prompt", () => {
+    const anchor = {
+      firstUserParts: [{ text: "first" }],
+      modelContent: { role: "model", parts: [] },
+    };
+
+    const body = buildChainedRequestBody(
+      {
+        prompt: "second",
+        model: "test",
+        ar: "16:9",
+        quality: "2k",
+        refs: [],
+        imageSize: "2K",
+      },
+      anchor,
+    );
+
+    const textPart = body.contents[2].parts[0] as { text: string };
+    expect(textPart.text).toContain("Aspect ratio: 16:9");
+  });
+});
+
+describe("createGoogleAnchor", () => {
+  test("captures firstUserParts and raw modelContent", () => {
+    const firstReq = {
+      prompt: "first prompt",
+      model: "test",
+      ar: "1:1" as string | null,
+      quality: "2k" as const,
+      refs: [],
+      imageSize: "2K" as const,
+    };
+
+    const rawResponse = {
+      candidates: [
+        {
+          content: {
+            role: "model",
+            parts: [
+              { thoughtSignature: "sig1" },
+              {
+                inlineData: {
+                  data: Buffer.from("img").toString("base64"),
+                  mimeType: "image/png",
+                },
+              },
+              { thoughtSignature: "sig2" },
+            ],
+          },
+          finishReason: "STOP",
+        },
+      ],
+    };
+
+    const anchor = createGoogleAnchor(firstReq, rawResponse);
+    expect(anchor.firstUserParts).toHaveLength(1);
+    expect((anchor.firstUserParts[0] as any).text).toContain("first prompt");
+    expect(anchor.modelContent.role).toBe("model");
+    expect(anchor.modelContent.parts).toHaveLength(3);
+    expect((anchor.modelContent.parts[0] as any).thoughtSignature).toBe("sig1");
   });
 });
