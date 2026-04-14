@@ -109,7 +109,7 @@ describe("payload estimation", () => {
     expect(BATCH_PAYLOAD_LIMIT).toBe(100 * 1024 * 1024);
   });
 
-  test("error message references 100MB limit", () => {
+  test("payload limit is not the old 20MB inline limit", () => {
     expect(BATCH_PAYLOAD_LIMIT).toBeGreaterThan(20 * 1024 * 1024);
   });
 });

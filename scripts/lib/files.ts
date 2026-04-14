@@ -252,6 +252,15 @@ function curlUploadJsonl(
     ], { encoding: "utf-8" });
 
     const headers = require("fs").readFileSync(tmpHeader, "utf-8");
+    // Check HTTP status from response headers
+    const statusMatch = headers.match(/^HTTP\/\S+\s+(\d+)/m);
+    const httpStatus = statusMatch ? parseInt(statusMatch[1], 10) : 0;
+    if (httpStatus && httpStatus >= 400) {
+      if (RETRYABLE_HTTP.has(httpStatus)) {
+        throw Object.assign(new Error(`Upload start failed: HTTP ${httpStatus}`), { retryable: true });
+      }
+      throw new Error(`Upload start failed: HTTP ${httpStatus}`);
+    }
     const match = headers.match(/x-goog-upload-url:\s*(\S+)/i);
     if (!match) throw new Error("No upload URL in curl response headers");
     const uploadUrl = match[1].trim();
