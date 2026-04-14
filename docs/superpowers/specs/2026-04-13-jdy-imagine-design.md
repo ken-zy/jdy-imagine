@@ -39,7 +39,7 @@ bun scripts/main.ts batch status <jobId>
 # Fetch results (for async jobs)
 bun scripts/main.ts batch fetch <jobId> --outdir ./images
 
-# List all jobs
+# List all jobs (remote API, optionally annotated with local manifests)
 bun scripts/main.ts batch list
 
 # Cancel a job
@@ -57,6 +57,8 @@ bun scripts/main.ts batch cancel <jobId>
 ```
 
 Per-task fields override global CLI args. Paths in `ref` resolve relative to the JSON file's directory.
+
+**v0.1 batch limitation:** `batch submit` does not support `ref` (reference images). If any task in `prompts.json` includes `ref`, the CLI exits with an error: "Batch mode does not support reference images in v0.1. Use `generate` for image-to-image tasks." This avoids the unsolved complexity of uploading/referencing images in batch payloads.
 
 ### Global Options
 
@@ -111,8 +113,16 @@ interface GenerateRequest {
 }
 
 interface GenerateResult {
-  image: Uint8Array
-  mimeType: string      // "image/png" | "image/jpeg"
+  images: Array<{
+    data: Uint8Array
+    mimeType: string    // "image/png" | "image/jpeg"
+  }>
+  finishReason: "STOP" | "SAFETY" | "MAX_TOKENS" | "OTHER"
+  safetyInfo?: {
+    category: string
+    reason: string
+  }
+  textParts?: string[]  // any text returned alongside images
 }
 
 interface BatchCreateRequest {
@@ -130,8 +140,7 @@ interface BatchJob {
 
 interface BatchResult {
   key: string
-  image?: Uint8Array
-  mimeType?: string
+  result?: GenerateResult  // same structure as realtime, including multi-image/safety/text
   error?: string
 }
 
@@ -176,7 +185,13 @@ Request body:
 }
 ```
 
-Response extraction: `candidates[0].content.parts[].inlineData.data` → base64 → Uint8Array.
+Response extraction:
+1. Check `candidates[0].finishReason` — if `SAFETY`, return `GenerateResult` with empty `images[]` and populated `safetyInfo`
+2. Iterate `candidates[0].content.parts[]`:
+   - `inlineData` parts → collect into `images[]`
+   - `text` parts → collect into `textParts[]`
+3. If `images[]` is empty and `finishReason` is `STOP`, treat as generation failure (model returned text-only)
+4. CLI behavior: first image saved to file; if multiple images returned, save all with `-a`, `-b` suffix; `--json` output includes all fields
 
 Retry: up to 3 attempts on 429/500/503 errors, exponential backoff (1s, 2s, 4s).
 
@@ -206,19 +221,40 @@ For inline requests (< 20MB total):
 }
 ```
 
-For large batches (> 20MB): upload JSONL via File API (`POST /upload/v1beta/files`), then reference `input_config.file_name`.
+v0.1 only supports inline batch (< 20MB total payload). If the computed payload exceeds 20MB, the CLI exits with an error suggesting to split into smaller batches. File API-based submission is deferred to a future version.
 
 **Poll** — `GET /v1beta/{batchName}`
 
 Returns `BatchJob` with `state`. Poll interval: 5s for first minute, then 15s, capped at 48h timeout.
 
-**Fetch results**:
-- Inline: `response.inlinedResponses[]`
-- File: `GET /download/v1beta/{responseFile}:download?alt=media` → JSONL, parse line by line
+**Fetch results** (v0.1: inline only):
+- `response.inlinedResponses[]` — each entry parsed using the same extraction logic as realtime (finishReason, safety, multi-image)
+- File-based response download (`GET /download/v1beta/{responseFile}:download`) is deferred to a future version alongside File API submission
 
 **List** — `GET /v1beta/batches`
 
 **Cancel** — `POST /v1beta/{batchName}:cancel`
+
+### Batch Manifest (Async Jobs)
+
+When `--async` is used, the CLI persists a manifest file at `{outdir}/.jdy-imagine-batch/{jobId}.json`:
+
+```json
+{
+  "jobId": "batches/abc123",
+  "model": "gemini-3.1-flash-image-preview",
+  "createTime": "2026-04-13T10:00:00Z",
+  "outdir": "./images",
+  "tasks": [
+    { "key": "001-sunset", "prompt": "A sunset over mountains", "ar": "16:9" },
+    { "key": "002-cat", "prompt": "A cat portrait" }
+  ]
+}
+```
+
+`batch fetch <jobId>` reads this manifest to reconstruct prompt→output mapping. If manifest is missing, fetch falls back to using the batch API's `metadata.key` field for naming, with a warning that original prompt context is unavailable.
+
+`batch list` queries the remote API (`GET /v1beta/batches`) for all jobs. If `--outdir` is specified, it also cross-references local manifests in `{outdir}/.jdy-imagine-batch/` to annotate jobs with local context (original prompts, output paths).
 
 ### Image Size Mapping
 
@@ -229,22 +265,28 @@ Returns `BatchJob` with `state`. Poll interval: 5s for first minute, then 15s, c
 
 ### Supported Models
 
-| Model | Realtime | Batch | Ref images |
-|-------|----------|-------|------------|
-| `gemini-3.1-flash-image-preview` (default) | ✅ | ✅ | ✅ |
-| `gemini-3-pro-image-preview` | ✅ | ✅ | ✅ |
-| `gemini-3-flash-preview` | ✅ | ✅ | ✅ |
+| Model | Realtime | Batch | Ref images | Notes |
+|-------|----------|-------|------------|-------|
+| `gemini-2.5-flash-image` | ✅ | ✅ | ✅ | GA image generation model |
+| `gemini-3.1-flash-image-preview` (default) | ✅ | ✅ | ✅ | Preview — may change |
+| `gemini-3-pro-image-preview` | ✅ | ✅ | ✅ | Preview — may change |
+
+Note: This is a verified allowlist based on Google's official image generation documentation as of 2026-04-13. Models not in this list may work but are untested. `gemini-3-flash-preview` was removed — it does not support image generation output per official docs. The `--model` flag accepts any model ID; the allowlist only affects default selection and documentation.
 
 ## Output Naming
 
 Pattern: `{outdir}/{NNN}-{slug}.png`
 
 Slug generation:
-1. Extract words from prompt (split on whitespace and punctuation)
-2. Take first 4 tokens (English words kept as-is, CJK characters kept as-is)
-3. Lowercase, join with `-`
-4. Truncate to 40 characters
-5. Strip trailing `-`
+1. Unicode NFC normalization
+2. Strip emoji, zero-width characters, and control characters
+3. Extract words from prompt (split on whitespace and punctuation)
+4. Take first 4 tokens (English words kept as-is, CJK characters kept as-is)
+5. Lowercase, join with `-`
+6. Remove OS-reserved characters (`<>:"/\|?*`, ASCII control chars 0-31)
+7. Truncate to 40 characters
+8. Strip trailing `-` and `.`
+9. If slug is empty after sanitization, fall back to `NNN-img.png`
 
 Examples:
 - `"A sunset over mountains"` → `001-a-sunset-over-mountains.png`
@@ -316,8 +358,12 @@ Simple KEY=VALUE parser, only sets if not already in environment.
 | Batch job failed | Report per-task errors |
 | Batch job expired (48h) | Report timeout, suggest resubmit |
 | Ref image not found | Exit with file path in error |
-| Ref image with unsupported model | Exit with supported model list |
+| Ref image rejected by API (model doesn't support refs) | Forward API error with hint to check supported models in docs |
 | Output dir not writable | Exit with permission error |
+| Safety block (finishReason=SAFETY) | Exit with safety category/reason, no retry |
+| No image in response (text-only) | Exit with "model returned text instead of image" |
+| Batch task includes ref | Exit with "batch + ref not supported in v0.1" |
+| Batch payload > 20MB | Exit with "payload too large, split into smaller batches" |
 
 ## Plugin Metadata
 
@@ -334,6 +380,8 @@ Simple KEY=VALUE parser, only sets if not already in environment.
 
 - Other providers (OpenAI, Replicate, etc.) — architecture supports it, not implemented
 - `--image` single file output (use `--outdir` only)
-- Batch file-based submission via File API (inline only in v0.1, covers most use cases under 20MB)
+- Batch file-based submission via File API — inline only, CLI enforces 20MB limit with clear error
+- Batch + reference images (`ref` in batch tasks) — CLI validates and exits with error
 - EXTEND.md first-time setup wizard
 - Prompt files (`--promptfiles`)
+- Runtime model capability detection — models are configurable via `--model` / env var
