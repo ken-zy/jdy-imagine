@@ -427,6 +427,78 @@ describe("createGoogleAnchor", () => {
   });
 });
 
+describe("buildBatchJsonl", () => {
+  test("produces valid JSONL with correct keys", () => {
+    const { data, keys } = buildBatchJsonl(
+      "gemini-3.1-flash-image-preview",
+      [
+        { prompt: "A sunset over mountains", model: "test", ar: "16:9", quality: "2k", refs: [], imageSize: "2K" },
+        { prompt: "A cat sleeping", model: "test", ar: null, quality: "normal", refs: [], imageSize: "1K" },
+      ],
+      "test-batch",
+    );
+
+    const text = new TextDecoder().decode(data);
+    const lines = text.trim().split("\n");
+    expect(lines).toHaveLength(2);
+
+    const line1 = JSON.parse(lines[0]);
+    const line2 = JSON.parse(lines[1]);
+
+    expect(line1.key).toMatch(/^001-/);
+    expect(line2.key).toMatch(/^002-/);
+    expect(keys).toEqual([line1.key, line2.key]);
+
+    expect(line1.request.contents[0].parts).toBeDefined();
+    expect(line1.request.generationConfig.responseModalities).toEqual(["IMAGE"]);
+    expect(line1.request.generationConfig.imageConfig.imageSize).toBe("2K");
+    expect(line2.request.generationConfig.imageConfig.imageSize).toBe("1K");
+  });
+
+  test("includes aspect ratio in prompt text", () => {
+    const { data } = buildBatchJsonl(
+      "test-model",
+      [{ prompt: "A cat", model: "test", ar: "16:9", quality: "2k", refs: [], imageSize: "2K" }],
+      "test",
+    );
+
+    const line = JSON.parse(new TextDecoder().decode(data).trim());
+    const textPart = line.request.contents[0].parts.find((p: any) => p.text);
+    expect(textPart.text).toContain("Aspect ratio: 16:9");
+  });
+
+  test("inlines ref images as base64", () => {
+    const { mkdtempSync, writeFileSync } = require("fs");
+    const { join } = require("path");
+    const { tmpdir } = require("os");
+    const dir = mkdtempSync(join(tmpdir(), "jsonl-ref-"));
+    const refPath = join(dir, "ref.png");
+    writeFileSync(refPath, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+
+    const { data } = buildBatchJsonl(
+      "test-model",
+      [{ prompt: "Edit this", model: "test", ar: null, quality: "2k", refs: [refPath], imageSize: "2K" }],
+      "test",
+    );
+
+    const line = JSON.parse(new TextDecoder().decode(data).trim());
+    const parts = line.request.contents[0].parts;
+    expect(parts[0]).toHaveProperty("inlineData");
+    expect(parts[0].inlineData.mimeType).toBe("image/png");
+    expect(parts[1]).toHaveProperty("text");
+  });
+
+  test("returns Uint8Array with trailing newline", () => {
+    const { data } = buildBatchJsonl(
+      "test-model",
+      [{ prompt: "A cat", model: "test", ar: null, quality: "normal", refs: [], imageSize: "1K" }],
+      "test",
+    );
+    const text = new TextDecoder().decode(data);
+    expect(text.endsWith("\n")).toBe(true);
+  });
+});
+
 describe("parseJsonlResultLine", () => {
   test("parses successful result line", () => {
     const line = JSON.stringify({

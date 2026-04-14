@@ -265,6 +265,57 @@ export function buildBatchRequestBody(
   };
 }
 
+export function buildBatchJsonl(
+  _model: string,
+  tasks: GenerateRequest[],
+  _displayName: string,
+): { data: Uint8Array; keys: string[] } {
+  const keys: string[] = [];
+  const lines: string[] = [];
+
+  for (let i = 0; i < tasks.length; i++) {
+    const task = tasks[i];
+    const seq = String(i + 1).padStart(3, "0");
+    const slug = generateSlug(task.prompt);
+    const key = `${seq}-${slug}`;
+    keys.push(key);
+
+    const parts: Array<Record<string, unknown>> = [];
+    for (const refPath of task.refs) {
+      const data = readFileSync(refPath);
+      const ext = refPath.split(".").pop()?.toLowerCase();
+      const mimeType = ext === "jpg" || ext === "jpeg" ? "image/jpeg" : "image/png";
+      parts.push({
+        inlineData: {
+          data: Buffer.from(data).toString("base64"),
+          mimeType,
+        },
+      });
+    }
+
+    let promptText = task.prompt;
+    if (task.ar) {
+      promptText += `. Aspect ratio: ${task.ar}.`;
+    }
+    parts.push({ text: promptText });
+
+    const lineObj = {
+      key,
+      request: {
+        contents: [{ parts }],
+        generationConfig: {
+          responseModalities: ["IMAGE"],
+          imageConfig: { imageSize: task.imageSize },
+        },
+      },
+    };
+    lines.push(JSON.stringify(lineObj));
+  }
+
+  const text = lines.join("\n") + "\n";
+  return { data: new TextEncoder().encode(text), keys };
+}
+
 export function parseBatchResponse(apiResponse: {
   inlinedResponses?: Array<{
     metadata?: { key?: string };
