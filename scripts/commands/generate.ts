@@ -1,6 +1,6 @@
 import { readFileSync } from "fs";
 import { resolve, dirname } from "path";
-import type { GenerateRequest, Provider } from "../providers/types";
+import type { GenerateRequest, GenerateResult, Provider, ChainAnchor } from "../providers/types";
 import {
   generateSlug,
   resolveOutputPath,
@@ -11,11 +11,14 @@ import {
 } from "../lib/output";
 import type { Config } from "../lib/config";
 import { mapQualityToImageSize } from "../providers/google";
+import { loadCharacter, applyCharacterPrompt, mergeCharacterRefs, type CharacterProfile } from "../lib/character";
 
 export interface GenerateFlags {
   prompt?: string;
   prompts?: string;
   ref?: string[];
+  character?: string;   // NEW
+  chain?: boolean;       // NEW
 }
 
 export function validateGenerateArgs(flags: GenerateFlags): void {
@@ -49,7 +52,6 @@ export function loadPrompts(
     ];
   }
 
-  // Load from prompts.json
   const filePath = resolve(flags.prompts!);
   const content = readFileSync(filePath, "utf-8");
   const tasks = JSON.parse(content) as Array<{
@@ -68,6 +70,8 @@ export function loadPrompts(
   }));
 }
 
+// No hidden contracts — generateAndAnchor is in the public Provider interface
+
 export async function runGenerate(
   provider: Provider,
   config: Config,
@@ -77,10 +81,17 @@ export async function runGenerate(
     ref?: string[];
     outdir: string;
     json: boolean;
+    character?: string;
+    chain?: boolean;
   },
 ): Promise<void> {
   validateGenerateArgs(flags);
   ensureOutdir(flags.outdir);
+
+  // Load character profile if specified
+  const character = flags.character
+    ? loadCharacter(resolve(flags.character))
+    : null;
 
   const tasks = loadPrompts(flags, {
     model: config.model,
@@ -89,9 +100,35 @@ export async function runGenerate(
     refs: flags.ref?.map((r) => resolve(r)) ?? [],
   });
 
+  // Resolve all refs to absolute paths FIRST (before dedup in mergeCharacterRefs)
+  for (const task of tasks) {
+    task.refs = task.refs.map((r) => resolve(r));
+  }
+
+  // Apply character: prompt injection for ALL tasks, ref injection depends on chain mode
+  const useChain = flags.chain === true && tasks.length > 1;
+  if (character) {
+    for (let i = 0; i < tasks.length; i++) {
+      // Always inject description + negative into prompt
+      tasks[i].prompt = applyCharacterPrompt(tasks[i].prompt, character);
+      // Merge character refs: always for non-chain, only first task for chain
+      if (!useChain || i === 0) {
+        tasks[i].refs = mergeCharacterRefs(tasks[i].refs, character);
+      }
+      // Chain tasks 2..N: character refs are already in anchor's firstUserParts
+      // Only task-specific refs (from prompts.json "ref" field) are sent
+    }
+  }
+
+  let anchor: ChainAnchor | undefined;
+  let hasAnchor = false;
+
   let seq = nextSeqNumber(flags.outdir);
 
-  for (const task of tasks) {
+  for (let taskIdx = 0; taskIdx < tasks.length; taskIdx++) {
+    const task = tasks[taskIdx];
+    const isFirstTask = taskIdx === 0;
+
     const req: GenerateRequest = {
       prompt: task.prompt,
       model: config.model,
@@ -101,19 +138,82 @@ export async function runGenerate(
       imageSize: mapQualityToImageSize(task.quality ?? config.quality),
     };
 
-    const result = await provider.generate(req);
+    let result: GenerateResult;
 
-    // Handle safety block
+    if (useChain && !isFirstTask && hasAnchor) {
+      // Chained generation: use anchor
+      if (!provider.generateChained) {
+        throw new Error(`Provider ${provider.name} does not support chain mode`);
+      }
+      try {
+        result = await provider.generateChained(req, anchor);
+      } catch (err) {
+        // Subsequent task failure: skip and continue
+        const msg = err instanceof Error ? err.message : String(err);
+        if (flags.json) {
+          console.log(JSON.stringify({ error: msg, prompt: task.prompt, skipped: true }));
+        } else {
+          console.error(`[skip] ${task.prompt.slice(0, 60)}... — ${msg}`);
+        }
+        continue;
+      }
+    } else if (useChain && isFirstTask) {
+      // First task in chain: generate + create anchor in one call
+      if (!provider.generateAndAnchor) {
+        throw new Error(`Provider ${provider.name} does not support chain mode`);
+      }
+      const { result: firstResult, anchor: newAnchor } =
+        await provider.generateAndAnchor(req);
+      result = firstResult;
+
+      // First image guard
+      if (result.finishReason === "SAFETY" || result.images.length === 0) {
+        const msg = result.safetyInfo
+          ? `Chain aborted: first image generation failed — ${result.safetyInfo.reason}`
+          : "Chain aborted: first image generation failed (no image returned)";
+        if (flags.json) {
+          console.log(JSON.stringify({ error: msg, finishReason: result.finishReason }));
+        } else {
+          console.error(msg);
+        }
+        process.exit(1);
+      }
+      if (result.images.length > 1) {
+        const msg =
+          "Chain aborted: first task returned multiple images, cannot determine anchor. Use a more specific prompt for the first task.";
+        if (flags.json) {
+          console.log(JSON.stringify({ error: msg }));
+        } else {
+          console.error(msg);
+        }
+        process.exit(1);
+      }
+
+      anchor = newAnchor;
+      hasAnchor = true;
+    } else {
+      // Normal (non-chain) generation
+      result = await provider.generate(req);
+    }
+
+    // Handle safety block (non-chain or first-task already handled above)
     if (result.finishReason === "SAFETY") {
       const msg = result.safetyInfo
         ? `Safety block: ${result.safetyInfo.category} — ${result.safetyInfo.reason}`
         : "Content blocked by safety filter";
       if (flags.json) {
-        console.log(JSON.stringify({ error: msg, finishReason: "SAFETY", safetyInfo: result.safetyInfo }));
+        console.log(
+          JSON.stringify({
+            error: msg,
+            finishReason: "SAFETY",
+            safetyInfo: result.safetyInfo,
+          }),
+        );
       } else {
         console.error(msg);
       }
-      process.exit(1);
+      if (!useChain) process.exit(1);
+      continue; // In chain mode for non-first tasks, skip
     }
 
     // Handle no images
@@ -126,7 +226,8 @@ export async function runGenerate(
       } else {
         console.error(msg);
       }
-      process.exit(1);
+      if (!useChain) process.exit(1);
+      continue; // In chain mode for non-first tasks, skip
     }
 
     // Write images
@@ -134,9 +235,10 @@ export async function runGenerate(
     for (let imgIdx = 0; imgIdx < result.images.length; imgIdx++) {
       const img = result.images[imgIdx];
       const ext = mimeToExt(img.mimeType);
-      const imgSlug = result.images.length > 1
-        ? `${slug}-${String.fromCharCode(97 + imgIdx)}` // -a, -b, -c
-        : slug;
+      const imgSlug =
+        result.images.length > 1
+          ? `${slug}-${String.fromCharCode(97 + imgIdx)}`
+          : slug;
       const outPath = resolveOutputPath(flags.outdir, imgSlug, seq, ext);
       writeImage(outPath, img.data);
 

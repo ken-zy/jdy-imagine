@@ -5,6 +5,7 @@ import type { Config } from "../lib/config";
 import type { ParsedArgs } from "../lib/args";
 import { generateSlug, ensureOutdir, writeImage, mimeToExt } from "../lib/output";
 import { mapQualityToImageSize } from "../providers/google";
+import { loadCharacter, applyCharacterPrompt, mergeCharacterRefs } from "../lib/character";
 
 export interface BatchManifest {
   jobId: string;
@@ -86,6 +87,18 @@ async function batchSubmit(
     throw new Error("Usage: batch submit <prompts.json> [--outdir dir] [--async]");
   }
 
+  // Warn if --chain used with batch
+  if (args.flags.chain) {
+    console.error(
+      "Warning: --chain is not supported in batch mode (each request is independent). Ignored.",
+    );
+  }
+
+  // Load character profile if specified
+  const character = args.flags.character
+    ? loadCharacter(resolve(args.flags.character))
+    : null;
+
   const filePath = resolve(args.positional);
   const content = readFileSync(filePath, "utf-8");
   const rawTasks = JSON.parse(content) as Array<{
@@ -96,14 +109,51 @@ async function batchSubmit(
   }>;
 
   const dir = dirname(filePath);
-  const tasks: GenerateRequest[] = rawTasks.map((t) => ({
-    prompt: t.prompt,
-    model: config.model,
-    ar: t.ar ?? config.ar,
-    quality: t.quality ?? config.quality,
-    refs: t.ref?.map((r) => resolve(dir, r)) ?? [],
-    imageSize: mapQualityToImageSize(t.quality ?? config.quality),
-  }));
+  const tasks: GenerateRequest[] = rawTasks.map((t) => {
+    let prompt = t.prompt;
+    let refs = t.ref?.map((r) => resolve(dir, r)) ?? [];
+
+    // Apply character profile
+    if (character) {
+      prompt = applyCharacterPrompt(prompt, character);
+      refs = mergeCharacterRefs(refs, character);
+    }
+
+    return {
+      prompt,
+      model: config.model,
+      ar: t.ar ?? config.ar,
+      quality: t.quality ?? config.quality,
+      refs,
+      imageSize: mapQualityToImageSize(t.quality ?? config.quality),
+    };
+  });
+
+  // Payload estimation guardrail (total: character refs + task refs + prompts per task)
+  {
+    const BASE64_OVERHEAD = 1.37;
+    const JSON_OVERHEAD_PER_TASK = 512; // JSON structure, metadata keys, etc.
+    let totalEstimate = 0;
+    for (const task of tasks) {
+      // Refs for this task (includes character refs if merged)
+      let taskRefBytes = 0;
+      for (const refPath of task.refs) {
+        taskRefBytes += readFileSync(refPath).length;
+      }
+      totalEstimate += taskRefBytes * BASE64_OVERHEAD;
+      totalEstimate += Buffer.byteLength(task.prompt, "utf-8");
+      totalEstimate += JSON_OVERHEAD_PER_TASK;
+    }
+    const LIMIT = 20 * 1024 * 1024;
+    if (totalEstimate > LIMIT) {
+      const charRefNote = character
+        ? ` Character references are duplicated across all ${tasks.length} tasks — consider removing them or reducing tasks per batch.`
+        : "";
+      throw new Error(
+        `Estimated batch payload (~${Math.round(totalEstimate / 1024 / 1024)}MB) exceeds 20MB limit.${charRefNote}`,
+      );
+    }
+  }
 
   const outdir = args.flags.outdir;
   ensureOutdir(outdir);

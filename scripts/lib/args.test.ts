@@ -73,3 +73,44 @@ describe("parseArgs", () => {
     expect(result.flags.outdir).toBe(".");
   });
 });
+
+describe("--chain flag", () => {
+  test("defaults to false", () => {
+    const result = parseArgs(["generate", "--prompt", "test"]);
+    expect(result.flags.chain).toBe(false);
+  });
+
+  test("sets chain to true", () => {
+    const result = parseArgs(["generate", "--prompts", "p.json", "--chain"]);
+    expect(result.flags.chain).toBe(true);
+  });
+});
+
+describe("--character flag", () => {
+  test("defaults to undefined", () => {
+    const result = parseArgs(["generate", "--prompt", "test"]);
+    expect(result.flags.character).toBeUndefined();
+  });
+
+  test("parses character path", () => {
+    const result = parseArgs([
+      "generate",
+      "--prompt",
+      "test",
+      "--character",
+      "model-a.json",
+    ]);
+    expect(result.flags.character).toBe("model-a.json");
+  });
+
+  test("works with batch command", () => {
+    const result = parseArgs([
+      "batch",
+      "submit",
+      "prompts.json",
+      "--character",
+      "char.json",
+    ]);
+    expect(result.flags.character).toBe("char.json");
+  });
+});

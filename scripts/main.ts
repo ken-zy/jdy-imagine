@@ -42,6 +42,8 @@ async function main() {
         ref: args.flags.ref,
         outdir: args.flags.outdir,
         json: args.flags.json,
+        character: args.flags.character,
+        chain: args.flags.chain,
       });
       break;
 

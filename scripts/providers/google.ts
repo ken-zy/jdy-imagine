@@ -8,6 +8,7 @@ import type {
   BatchJob,
   BatchResult,
   Provider,
+  ChainAnchor,
 } from "./types";
 
 export function mapQualityToImageSize(
@@ -118,6 +119,79 @@ export function parseGenerateResponse(apiResponse: {
   return result;
 }
 
+// Google-internal chain anchor type
+interface GoogleChainAnchor {
+  firstUserParts: Array<Record<string, unknown>>;
+  modelContent: { role: string; parts: Array<Record<string, unknown>> };
+}
+
+export function createGoogleAnchor(
+  firstReq: GenerateRequest,
+  rawResponse: unknown,
+): GoogleChainAnchor | null {
+  const resp = rawResponse as {
+    candidates?: Array<{
+      content?: { role: string; parts: Array<Record<string, unknown>> };
+    }>;
+  };
+  const modelContent = resp.candidates?.[0]?.content;
+  if (!modelContent) {
+    // SAFETY blocks often return no content — let orchestrator handle via first-image guard
+    return null;
+  }
+
+  const body = buildRealtimeRequestBody(firstReq);
+  const firstUserParts = body.contents[0].parts;
+
+  return { firstUserParts, modelContent };
+}
+
+export function buildChainedRequestBody(
+  req: GenerateRequest,
+  anchor: GoogleChainAnchor,
+): {
+  contents: Array<{
+    role: string;
+    parts: Array<Record<string, unknown>>;
+  }>;
+  generationConfig: {
+    responseModalities: string[];
+    imageConfig: { imageSize: string };
+  };
+} {
+  // Current user turn: task-specific refs (NOT character refs) + prompt
+  const currentParts: Array<Record<string, unknown>> = [];
+  for (const refPath of req.refs) {
+    const data = readFileSync(refPath);
+    const ext = refPath.split(".").pop()?.toLowerCase();
+    const mimeType =
+      ext === "jpg" || ext === "jpeg" ? "image/jpeg" : "image/png";
+    currentParts.push({
+      inlineData: {
+        data: Buffer.from(data).toString("base64"),
+        mimeType,
+      },
+    });
+  }
+  let promptText = req.prompt;
+  if (req.ar) {
+    promptText += `. Aspect ratio: ${req.ar}.`;
+  }
+  currentParts.push({ text: promptText });
+
+  return {
+    contents: [
+      { role: "user", parts: anchor.firstUserParts },
+      { role: anchor.modelContent.role, parts: anchor.modelContent.parts },
+      { role: "user", parts: currentParts },
+    ],
+    generationConfig: {
+      responseModalities: ["IMAGE"],
+      imageConfig: { imageSize: req.imageSize },
+    },
+  };
+}
+
 export function validateBatchTasks(_tasks: GenerateRequest[]): void {
   // Batch mode supports reference images via inline base64 (same as realtime)
 }
@@ -226,9 +300,9 @@ export function createGoogleProvider(
   apiKey: string,
   baseUrl: string,
 ): Provider {
-  async function generateWithRetry(
+  async function generateCore(
     req: GenerateRequest,
-  ): Promise<GenerateResult> {
+  ): Promise<{ result: GenerateResult; rawResponse: unknown }> {
     const url = `${baseUrl}/v1beta/models/${req.model}:generateContent`;
     const body = buildRealtimeRequestBody(req);
 
@@ -236,7 +310,10 @@ export function createGoogleProvider(
       const res = await httpPost(url, body, apiKey);
 
       if (res.status === 200) {
-        return parseGenerateResponse(res.data as Parameters<typeof parseGenerateResponse>[0]);
+        return {
+          result: parseGenerateResponse(res.data as Parameters<typeof parseGenerateResponse>[0]),
+          rawResponse: res.data,
+        };
       }
 
       if (!RETRYABLE_STATUS.has(res.status) || attempt === RETRY_DELAYS.length) {
@@ -251,10 +328,44 @@ export function createGoogleProvider(
     throw new Error("Unreachable");
   }
 
+  async function generateWithRetry(
+    req: GenerateRequest,
+  ): Promise<GenerateResult> {
+    const { result } = await generateCore(req);
+    return result;
+  }
+
   return {
     name: "google",
     defaultModel: "gemini-3.1-flash-image-preview",
     generate: generateWithRetry,
+
+    // Chain: first task — generate + create anchor in one call
+    async generateAndAnchor(req: GenerateRequest) {
+      const { result, rawResponse } = await generateCore(req);
+      const anchor = createGoogleAnchor(req, rawResponse) as ChainAnchor;
+      return { result, anchor };
+    },
+
+    // Chain: subsequent tasks — generate using anchor
+    async generateChained(req: GenerateRequest, anchor: ChainAnchor) {
+      const googleAnchor = anchor as GoogleChainAnchor;
+      const url = `${baseUrl}/v1beta/models/${req.model}:generateContent`;
+      const body = buildChainedRequestBody(req, googleAnchor);
+
+      for (let attempt = 0; attempt <= RETRY_DELAYS.length; attempt++) {
+        const res = await httpPost(url, body, apiKey);
+        if (res.status === 200) {
+          return parseGenerateResponse(res.data as Parameters<typeof parseGenerateResponse>[0]);
+        }
+        if (!RETRYABLE_STATUS.has(res.status) || attempt === RETRY_DELAYS.length) {
+          const errData = res.data as { error?: { message?: string } };
+          throw new Error(errData?.error?.message ?? `HTTP ${res.status}`);
+        }
+        await Bun.sleep(RETRY_DELAYS[attempt]);
+      }
+      throw new Error("Unreachable");
+    },
 
     async batchCreate(req: BatchCreateRequest): Promise<BatchJob> {
       validateBatchTasks(req.tasks);
