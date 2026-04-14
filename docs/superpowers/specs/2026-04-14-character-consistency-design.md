@@ -157,33 +157,34 @@ When `generateChained` is called, Google provider constructs multi-turn contents
   "contents": [
     {
       "role": "user",
-      "parts": [
-        { "inlineData": { "data": "<ref_base64>", "mimeType": "image/png" } },
-        { "text": "character desc + first prompt" }
-      ]
+      "parts": "<anchor.firstUserParts — raw parts array as originally sent>"
     },
-    {
-      "role": "model",
-      "parts": [
-        { "thoughtSignature": "<base64_signature>" },
-        { "inlineData": { "data": "<anchor_image_base64>", "mimeType": "image/png" } },
-        { "thoughtSignature": "<base64_signature_2>" }
-      ]
-    },
+    "<anchor.modelContent — raw model response object, replayed verbatim including all thoughtSignature fields in their original positions>",
     {
       "role": "user",
-      "parts": [{ "text": "character desc + current prompt" }]
+      "parts": [
+        "<optional: current task ref images as inlineData>",
+        { "text": "character desc + current prompt" }
+      ]
     }
   ],
   "generationConfig": { "responseModalities": ["IMAGE"], "imageConfig": { "imageSize": "2K" } }
 }
 ```
 
+**Important:** The first two entries (anchor user turn + model turn) are replayed from preserved raw API objects, not reconstructed. This ensures all `thoughtSignature` fields, part ordering, and metadata are exactly as the API returned them. Do NOT hand-craft the model turn structure — the exact format of `thoughtSignature` placement varies by model version and must be preserved as-is.
+
 Key details:
-- The model turn is the **raw preserved content** from the first generation, including all `thoughtSignature` fields in their original positions
-- Character refs (inlineData) only appear in the first user turn (from `firstUserParts`)
-- Character description is injected in every user turn (reinforces identity)
-- The first user turn is reconstructed from `GoogleChainAnchor.firstUserParts`
+- The first user turn is `GoogleChainAnchor.firstUserParts` verbatim (includes original refs + prompt)
+- The model turn is `GoogleChainAnchor.modelContent` verbatim (includes thoughtSignature, inlineData, text in original order)
+- Character description is injected in every user turn (reinforces identity in the current turn)
+- The current (last) user turn carries the current task's own refs (if any) plus the current prompt
+
+### Subsequent Task Refs in Chain Mode
+
+Tasks 2..N in a chain may have their own `ref` fields (from prompts.json or `--ref`). These are placed as `inlineData` parts in the **last user turn** (the current task's turn), before the text prompt. This is useful for scenarios like showing the model a specific garment or prop to apply to the anchored character.
+
+Character refs are NOT re-sent in subsequent user turns — they are already present in the first user turn via `firstUserParts`. Only the current task's own refs appear in the last turn.
 
 ### First Image Guard
 
