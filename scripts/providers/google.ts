@@ -1,0 +1,358 @@
+import { readFileSync } from "fs";
+import { httpPost, httpGet, httpPostWithRetry, httpGetWithRetry } from "../lib/http";
+import { generateSlug } from "../lib/output";
+import type {
+  GenerateRequest,
+  GenerateResult,
+  BatchCreateRequest,
+  BatchJob,
+  BatchResult,
+  Provider,
+} from "./types";
+
+export function mapQualityToImageSize(
+  quality: "normal" | "2k",
+): "1K" | "2K" {
+  return quality === "normal" ? "1K" : "2K";
+}
+
+export function buildRealtimeRequestBody(req: GenerateRequest): {
+  contents: Array<{
+    role: string;
+    parts: Array<Record<string, unknown>>;
+  }>;
+  generationConfig: {
+    responseModalities: string[];
+    imageConfig: { imageSize: string };
+  };
+} {
+  const parts: Array<Record<string, unknown>> = [];
+
+  // Add ref images as inlineData parts
+  for (const refPath of req.refs) {
+    const data = readFileSync(refPath);
+    const ext = refPath.split(".").pop()?.toLowerCase();
+    const mimeType =
+      ext === "jpg" || ext === "jpeg" ? "image/jpeg" : "image/png";
+    parts.push({
+      inlineData: {
+        data: Buffer.from(data).toString("base64"),
+        mimeType,
+      },
+    });
+  }
+
+  // Build prompt text with aspect ratio appended
+  let promptText = req.prompt;
+  if (req.ar) {
+    promptText += `. Aspect ratio: ${req.ar}.`;
+  }
+  parts.push({ text: promptText });
+
+  return {
+    contents: [{ role: "user", parts }],
+    generationConfig: {
+      responseModalities: ["IMAGE"],
+      imageConfig: { imageSize: req.imageSize },
+    },
+  };
+}
+
+export function parseGenerateResponse(apiResponse: {
+  candidates?: Array<{
+    content?: { parts?: Array<Record<string, unknown>> };
+    finishReason?: string;
+    safetyRatings?: Array<{
+      category: string;
+      probability: string;
+    }>;
+  }>;
+}): GenerateResult {
+  const candidate = apiResponse.candidates?.[0];
+  const finishReason = (candidate?.finishReason ?? "OTHER") as
+    | "STOP"
+    | "SAFETY"
+    | "MAX_TOKENS"
+    | "OTHER";
+
+  const result: GenerateResult = {
+    images: [],
+    finishReason,
+  };
+
+  // Handle safety block
+  if (finishReason === "SAFETY") {
+    const rating = candidate?.safetyRatings?.[0];
+    if (rating) {
+      result.safetyInfo = {
+        category: rating.category,
+        reason: `Blocked: ${rating.category} (${rating.probability})`,
+      };
+    }
+    return result;
+  }
+
+  // Parse parts
+  const parts = candidate?.content?.parts ?? [];
+  const textParts: string[] = [];
+
+  for (const part of parts) {
+    if (part.inlineData) {
+      const inline = part.inlineData as {
+        data: string;
+        mimeType: string;
+      };
+      result.images.push({
+        data: Buffer.from(inline.data, "base64"),
+        mimeType: inline.mimeType,
+      });
+    } else if (typeof part.text === "string") {
+      textParts.push(part.text);
+    }
+  }
+
+  if (textParts.length > 0) {
+    result.textParts = textParts;
+  }
+
+  return result;
+}
+
+export function validateBatchTasks(tasks: GenerateRequest[]): void {
+  for (const task of tasks) {
+    if (task.refs.length > 0) {
+      throw new Error(
+        "Batch mode does not support reference images in v0.1. Use `generate` for image-to-image tasks.",
+      );
+    }
+  }
+}
+
+export function buildBatchRequestBody(
+  model: string,
+  tasks: GenerateRequest[],
+  displayName: string,
+): {
+  batch: {
+    display_name: string;
+    input_config: {
+      requests: {
+        requests: Array<{
+          request: {
+            contents: Array<{ parts: Array<Record<string, unknown>> }>;
+            generationConfig: {
+              responseModalities: string[];
+              imageConfig: { imageSize: string };
+            };
+          };
+          metadata: { key: string };
+        }>;
+      };
+    };
+  };
+} {
+  const requests = tasks.map((task, i) => {
+    const seq = String(i + 1).padStart(3, "0");
+    const slug = generateSlug(task.prompt);
+    let promptText = task.prompt;
+    if (task.ar) {
+      promptText += `. Aspect ratio: ${task.ar}.`;
+    }
+    return {
+      request: {
+        contents: [{ parts: [{ text: promptText }] }],
+        generationConfig: {
+          responseModalities: ["IMAGE"],
+          imageConfig: { imageSize: task.imageSize },
+        },
+      },
+      metadata: { key: `${seq}-${slug}` },
+    };
+  });
+
+  return {
+    batch: {
+      display_name: displayName,
+      input_config: {
+        requests: { requests },
+      },
+    },
+  };
+}
+
+export function parseBatchResponse(apiResponse: {
+  inlinedResponses?: Array<{
+    metadata?: { key?: string };
+    response?: {
+      candidates?: Array<{
+        content?: { parts?: Array<Record<string, unknown>> };
+        finishReason?: string;
+        safetyRatings?: Array<{ category: string; probability: string }>;
+      }>;
+      error?: { message?: string };
+    };
+  }>;
+}): BatchResult[] {
+  const responses = apiResponse.inlinedResponses ?? [];
+  return responses.map((entry) => {
+    const key = entry.metadata?.key ?? "unknown";
+
+    if (entry.response?.error) {
+      return { key, error: entry.response.error.message ?? "Unknown error" };
+    }
+
+    const result = parseGenerateResponse(
+      entry.response as Parameters<typeof parseGenerateResponse>[0],
+    );
+    return { key, result };
+  });
+}
+
+const RETRY_DELAYS = [1000, 2000, 4000];
+const RETRYABLE_STATUS = new Set([429, 500, 503]);
+
+export function createGoogleProvider(
+  apiKey: string,
+  baseUrl: string,
+): Provider {
+  async function generateWithRetry(
+    req: GenerateRequest,
+  ): Promise<GenerateResult> {
+    const url = `${baseUrl}/v1beta/models/${req.model}:generateContent`;
+    const body = buildRealtimeRequestBody(req);
+
+    for (let attempt = 0; attempt <= RETRY_DELAYS.length; attempt++) {
+      const res = await httpPost(url, body, apiKey);
+
+      if (res.status === 200) {
+        return parseGenerateResponse(res.data as Parameters<typeof parseGenerateResponse>[0]);
+      }
+
+      if (!RETRYABLE_STATUS.has(res.status) || attempt === RETRY_DELAYS.length) {
+        const errData = res.data as { error?: { message?: string } };
+        const msg = errData?.error?.message ?? `HTTP ${res.status}`;
+        throw new Error(msg);
+      }
+
+      await Bun.sleep(RETRY_DELAYS[attempt]);
+    }
+
+    throw new Error("Unreachable");
+  }
+
+  return {
+    name: "google",
+    defaultModel: "gemini-3.1-flash-image-preview",
+    generate: generateWithRetry,
+
+    async batchCreate(req: BatchCreateRequest): Promise<BatchJob> {
+      validateBatchTasks(req.tasks);
+
+      const displayName = req.displayName ?? `jdy-imagine-${Date.now()}`;
+      const body = buildBatchRequestBody(req.model, req.tasks, displayName);
+
+      const payloadSize = JSON.stringify(body).length;
+      if (payloadSize > 20 * 1024 * 1024) {
+        throw new Error(
+          "Batch payload exceeds 20MB. Split into smaller batches.",
+        );
+      }
+
+      const url = `${baseUrl}/v1beta/models/${req.model}:batchGenerateContent`;
+      const res = await httpPostWithRetry(url, body, apiKey);
+
+      if (res.status !== 200) {
+        const errData = res.data as { error?: { message?: string } };
+        throw new Error(errData?.error?.message ?? `HTTP ${res.status}`);
+      }
+
+      const data = res.data as {
+        name?: string;
+        metadata?: { state?: string; createTime?: string };
+      };
+      return {
+        id: data.name ?? "",
+        state: (data.metadata?.state?.toLowerCase() ?? "pending") as BatchJob["state"],
+        createTime: data.metadata?.createTime ?? new Date().toISOString(),
+      };
+    },
+
+    async batchGet(jobId: string): Promise<BatchJob> {
+      const url = `${baseUrl}/v1beta/${jobId}`;
+      const res = await httpGetWithRetry(url, apiKey);
+
+      if (res.status !== 200) {
+        const errData = res.data as { error?: { message?: string } };
+        throw new Error(errData?.error?.message ?? `HTTP ${res.status}`);
+      }
+
+      const data = res.data as {
+        name?: string;
+        metadata?: {
+          state?: string;
+          createTime?: string;
+          totalCount?: number;
+          succeededCount?: number;
+          failedCount?: number;
+        };
+      };
+      return {
+        id: data.name ?? jobId,
+        state: (data.metadata?.state?.toLowerCase() ?? "pending") as BatchJob["state"],
+        createTime: data.metadata?.createTime ?? "",
+        stats: data.metadata?.totalCount != null
+          ? {
+              total: data.metadata.totalCount,
+              succeeded: data.metadata.succeededCount ?? 0,
+              failed: data.metadata.failedCount ?? 0,
+            }
+          : undefined,
+      };
+    },
+
+    async batchFetch(jobId: string): Promise<BatchResult[]> {
+      const url = `${baseUrl}/v1beta/${jobId}`;
+      const res = await httpGetWithRetry(url, apiKey);
+
+      if (res.status !== 200) {
+        const errData = res.data as { error?: { message?: string } };
+        throw new Error(errData?.error?.message ?? `HTTP ${res.status}`);
+      }
+
+      const data = res.data as { response?: Record<string, unknown> };
+      return parseBatchResponse(data.response ?? data as Parameters<typeof parseBatchResponse>[0]);
+    },
+
+    async batchList(): Promise<BatchJob[]> {
+      const url = `${baseUrl}/v1beta/batches`;
+      const res = await httpGetWithRetry(url, apiKey);
+
+      if (res.status !== 200) {
+        const errData = res.data as { error?: { message?: string } };
+        throw new Error(errData?.error?.message ?? `HTTP ${res.status}`);
+      }
+
+      const data = res.data as {
+        batches?: Array<{
+          name?: string;
+          metadata?: { state?: string; createTime?: string };
+        }>;
+      };
+      return (data.batches ?? []).map((b) => ({
+        id: b.name ?? "",
+        state: (b.metadata?.state?.toLowerCase() ?? "pending") as BatchJob["state"],
+        createTime: b.metadata?.createTime ?? "",
+      }));
+    },
+
+    async batchCancel(jobId: string): Promise<void> {
+      const url = `${baseUrl}/v1beta/${jobId}:cancel`;
+      const res = await httpPostWithRetry(url, {}, apiKey);
+
+      if (res.status !== 200) {
+        const errData = res.data as { error?: { message?: string } };
+        throw new Error(errData?.error?.message ?? `HTTP ${res.status}`);
+      }
+    },
+  };
+}
