@@ -128,10 +128,7 @@ interface GoogleChainAnchor {
 export function createGoogleAnchor(
   firstReq: GenerateRequest,
   rawResponse: unknown,
-): GoogleChainAnchor {
-  const body = buildRealtimeRequestBody(firstReq);
-  const firstUserParts = body.contents[0].parts;
-
+): GoogleChainAnchor | null {
   const resp = rawResponse as {
     candidates?: Array<{
       content?: { role: string; parts: Array<Record<string, unknown>> };
@@ -139,8 +136,12 @@ export function createGoogleAnchor(
   };
   const modelContent = resp.candidates?.[0]?.content;
   if (!modelContent) {
-    throw new Error("Cannot create chain anchor: no model content in response");
+    // SAFETY blocks often return no content — let orchestrator handle via first-image guard
+    return null;
   }
+
+  const body = buildRealtimeRequestBody(firstReq);
+  const firstUserParts = body.contents[0].parts;
 
   return { firstUserParts, modelContent };
 }
@@ -342,7 +343,7 @@ export function createGoogleProvider(
     // Chain: first task — generate + create anchor in one call
     async generateAndAnchor(req: GenerateRequest) {
       const { result, rawResponse } = await generateCore(req);
-      const anchor = createGoogleAnchor(req, rawResponse);
+      const anchor = createGoogleAnchor(req, rawResponse) as ChainAnchor;
       return { result, anchor };
     },
 
