@@ -37,6 +37,7 @@ export interface BatchJob {
     | "expired";
   createTime: string;
   stats?: { total: number; succeeded: number; failed: number };
+  responsesFile?: string; // file-based output: "files/abc123"
 }
 
 export interface BatchResult {

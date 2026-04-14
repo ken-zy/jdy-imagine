@@ -1,5 +1,6 @@
 import { readFileSync } from "fs";
 import { httpPost, httpGet, httpPostWithRetry, httpGetWithRetry } from "../lib/http";
+import { uploadJsonl, downloadJsonl } from "../lib/files";
 import { generateSlug } from "../lib/output";
 import type {
   GenerateRequest,
@@ -265,6 +266,57 @@ export function buildBatchRequestBody(
   };
 }
 
+export function buildBatchJsonl(
+  _model: string,
+  tasks: GenerateRequest[],
+  _displayName: string,
+): { data: Uint8Array; keys: string[] } {
+  const keys: string[] = [];
+  const lines: string[] = [];
+
+  for (let i = 0; i < tasks.length; i++) {
+    const task = tasks[i];
+    const seq = String(i + 1).padStart(3, "0");
+    const slug = generateSlug(task.prompt);
+    const key = `${seq}-${slug}`;
+    keys.push(key);
+
+    const parts: Array<Record<string, unknown>> = [];
+    for (const refPath of task.refs) {
+      const data = readFileSync(refPath);
+      const ext = refPath.split(".").pop()?.toLowerCase();
+      const mimeType = ext === "jpg" || ext === "jpeg" ? "image/jpeg" : "image/png";
+      parts.push({
+        inlineData: {
+          data: Buffer.from(data).toString("base64"),
+          mimeType,
+        },
+      });
+    }
+
+    let promptText = task.prompt;
+    if (task.ar) {
+      promptText += `. Aspect ratio: ${task.ar}.`;
+    }
+    parts.push({ text: promptText });
+
+    const lineObj = {
+      key,
+      request: {
+        contents: [{ parts }],
+        generationConfig: {
+          responseModalities: ["IMAGE"],
+          imageConfig: { imageSize: task.imageSize },
+        },
+      },
+    };
+    lines.push(JSON.stringify(lineObj));
+  }
+
+  const text = lines.join("\n") + "\n";
+  return { data: new TextEncoder().encode(text), keys };
+}
+
 export function parseBatchResponse(apiResponse: {
   inlinedResponses?: Array<{
     metadata?: { key?: string };
@@ -291,6 +343,43 @@ export function parseBatchResponse(apiResponse: {
     );
     return { key, result };
   });
+}
+
+export function parseJsonlResultLine(line: string): BatchResult | null {
+  if (!line.trim()) return null;
+
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = JSON.parse(line);
+  } catch {
+    console.error(`Warning: Failed to parse JSONL line: ${line.slice(0, 100)}`);
+    return null;
+  }
+
+  const key = (parsed.key as string) ?? "unknown";
+
+  // Top-level error
+  if (parsed.error) {
+    const errObj = parsed.error as { message?: string };
+    return { key, error: errObj.message ?? "Unknown error" };
+  }
+
+  // Response with error
+  const response = parsed.response as Record<string, unknown> | undefined;
+  if (response?.error) {
+    const errObj = response.error as { message?: string };
+    return { key, error: errObj.message ?? "Unknown error" };
+  }
+
+  // Successful response
+  if (response) {
+    const result = parseGenerateResponse(
+      response as Parameters<typeof parseGenerateResponse>[0],
+    );
+    return { key, result };
+  }
+
+  return { key, error: "No response in result line" };
 }
 
 const RETRY_DELAYS = [1000, 2000, 4000];
@@ -371,16 +460,25 @@ export function createGoogleProvider(
       validateBatchTasks(req.tasks);
 
       const displayName = req.displayName ?? `jdy-imagine-${Date.now()}`;
-      const body = buildBatchRequestBody(req.model, req.tasks, displayName);
+      const { data } = buildBatchJsonl(req.model, req.tasks, displayName);
 
-      const payloadSize = JSON.stringify(body).length;
-      if (payloadSize > 20 * 1024 * 1024) {
-        throw new Error(
-          "Batch payload exceeds 20MB. Split into smaller batches.",
-        );
+      // Soft warning for large payloads (file input supports up to 2GB)
+      const payloadMB = data.byteLength / (1024 * 1024);
+      if (payloadMB > 50) {
+        console.error(`Warning: Large payload (~${Math.round(payloadMB)}MB), upload may take a while.`);
       }
 
+      // Upload JSONL via Files API
+      const fileName = await uploadJsonl(data, displayName, apiKey, baseUrl);
+
+      // Create batch with file reference
       const url = `${baseUrl}/v1beta/models/${req.model}:batchGenerateContent`;
+      const body = {
+        batch: {
+          display_name: displayName,
+          input_config: { file_name: fileName },
+        },
+      };
       const res = await httpPostWithRetry(url, body, apiKey);
 
       if (res.status !== 200) {
@@ -388,14 +486,14 @@ export function createGoogleProvider(
         throw new Error(errData?.error?.message ?? `HTTP ${res.status}`);
       }
 
-      const data = res.data as {
+      const respData = res.data as {
         name?: string;
         metadata?: { state?: string; createTime?: string };
       };
       return {
-        id: data.name ?? "",
-        state: (data.metadata?.state?.toLowerCase() ?? "pending") as BatchJob["state"],
-        createTime: data.metadata?.createTime ?? new Date().toISOString(),
+        id: respData.name ?? "",
+        state: (respData.metadata?.state?.toLowerCase().replace(/^(job_state_|batch_state_)/, "") ?? "pending") as BatchJob["state"],
+        createTime: respData.metadata?.createTime ?? new Date().toISOString(),
       };
     },
 
@@ -417,10 +515,14 @@ export function createGoogleProvider(
           succeededCount?: number;
           failedCount?: number;
         };
+        response?: {
+          responsesFile?: string;
+          inlinedResponses?: unknown[];
+        };
       };
       return {
         id: data.name ?? jobId,
-        state: (data.metadata?.state?.toLowerCase() ?? "pending") as BatchJob["state"],
+        state: (data.metadata?.state?.toLowerCase().replace(/^(job_state_|batch_state_)/, "") ?? "pending") as BatchJob["state"],
         createTime: data.metadata?.createTime ?? "",
         stats: data.metadata?.totalCount != null
           ? {
@@ -429,10 +531,12 @@ export function createGoogleProvider(
               failed: data.metadata.failedCount ?? 0,
             }
           : undefined,
+        responsesFile: data.response?.responsesFile,
       };
     },
 
     async batchFetch(jobId: string): Promise<BatchResult[]> {
+      // Step 1: get full batch job response
       const url = `${baseUrl}/v1beta/${jobId}`;
       const res = await httpGetWithRetry(url, apiKey);
 
@@ -441,8 +545,44 @@ export function createGoogleProvider(
         throw new Error(errData?.error?.message ?? `HTTP ${res.status}`);
       }
 
-      const data = res.data as { response?: Record<string, unknown> };
-      return parseBatchResponse(data.response ?? data as Parameters<typeof parseBatchResponse>[0]);
+      const data = res.data as {
+        metadata?: { totalCount?: number; state?: string };
+        response?: {
+          responsesFile?: string;
+          inlinedResponses?: Array<{
+            metadata?: { key?: string };
+            response?: Record<string, unknown>;
+          }>;
+        };
+      };
+
+      const expectedTotal = data.metadata?.totalCount;
+
+      // Step 2: file-based path
+      if (data.response?.responsesFile) {
+        const results: BatchResult[] = [];
+        await downloadJsonl(data.response.responsesFile, apiKey, baseUrl, (line) => {
+          const result = parseJsonlResultLine(line);
+          if (result) results.push(result);
+        });
+
+        // Completeness check
+        if (expectedTotal != null && results.length < expectedTotal) {
+          console.error(
+            `Warning: Expected ${expectedTotal} results, got ${results.length}. ${expectedTotal - results.length} results may be missing.`,
+          );
+        }
+
+        return results;
+      }
+
+      // Step 2b: inline fallback for old jobs
+      if (data.response?.inlinedResponses) {
+        return parseBatchResponse(data.response as Parameters<typeof parseBatchResponse>[0]);
+      }
+
+      const state = data.metadata?.state ?? "unknown";
+      throw new Error(`Batch job has no result file. Job state: ${state}`);
     },
 
     async batchList(): Promise<BatchJob[]> {
@@ -462,7 +602,7 @@ export function createGoogleProvider(
       };
       return (data.batches ?? []).map((b) => ({
         id: b.name ?? "",
-        state: (b.metadata?.state?.toLowerCase() ?? "pending") as BatchJob["state"],
+        state: (b.metadata?.state?.toLowerCase().replace(/^(job_state_|batch_state_)/, "") ?? "pending") as BatchJob["state"],
         createTime: b.metadata?.createTime ?? "",
       }));
     },

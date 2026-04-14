@@ -1,5 +1,5 @@
 import { describe, test, expect } from "bun:test";
-import { detectProxy, buildHeaders } from "./http";
+import { detectProxy, buildHeaders, CONNECT_TIMEOUT, TOTAL_TIMEOUT, RETRY_DELAYS_HTTP, RETRYABLE_HTTP } from "./http";
 
 describe("detectProxy", () => {
   test("returns null when no proxy env vars", () => {
@@ -40,5 +40,14 @@ describe("buildHeaders", () => {
     const headers = buildHeaders("test-key");
     expect(headers["x-goog-api-key"]).toBe("test-key");
     expect(headers["Content-Type"]).toBe("application/json");
+  });
+});
+
+describe("exported transport constants", () => {
+  test("exports expected values", () => {
+    expect(CONNECT_TIMEOUT).toBe(30_000);
+    expect(TOTAL_TIMEOUT).toBe(300_000);
+    expect(RETRY_DELAYS_HTTP).toEqual([1000, 2000, 4000]);
+    expect(RETRYABLE_HTTP).toEqual(new Set([429, 500, 503]));
   });
 });

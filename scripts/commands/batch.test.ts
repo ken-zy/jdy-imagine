@@ -2,7 +2,7 @@ import { describe, test, expect } from "bun:test";
 import { mkdtempSync, writeFileSync, existsSync, readdirSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
-import { saveManifest, loadManifest, writeResults, type BatchManifest } from "./batch";
+import { saveManifest, loadManifest, writeResults, BATCH_PAYLOAD_LIMIT, type BatchManifest } from "./batch";
 import type { BatchResult } from "../providers/types";
 
 describe("saveManifest", () => {
@@ -101,5 +101,15 @@ describe("writeResults", () => {
     ];
     writeResults(results, dir, false, null);
     expect(existsSync(join(dir, "001-cat-2.png"))).toBe(true);
+  });
+});
+
+describe("payload estimation", () => {
+  test("payload limit is 100MB for file-based input", () => {
+    expect(BATCH_PAYLOAD_LIMIT).toBe(100 * 1024 * 1024);
+  });
+
+  test("payload limit is not the old 20MB inline limit", () => {
+    expect(BATCH_PAYLOAD_LIMIT).toBeGreaterThan(20 * 1024 * 1024);
   });
 });

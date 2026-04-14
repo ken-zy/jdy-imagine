@@ -93,3 +93,24 @@ describe("Provider types", () => {
     expect(minimal.generateChained).toBeUndefined();
   });
 });
+
+describe("BatchJob type", () => {
+  test("accepts responsesFile field", () => {
+    const job: BatchJob = {
+      id: "batches/abc",
+      state: "succeeded",
+      createTime: "2026-04-14T00:00:00Z",
+      responsesFile: "files/output456",
+    };
+    expect(job.responsesFile).toBe("files/output456");
+  });
+
+  test("responsesFile is optional", () => {
+    const job: BatchJob = {
+      id: "batches/abc",
+      state: "pending",
+      createTime: "2026-04-14T00:00:00Z",
+    };
+    expect(job.responsesFile).toBeUndefined();
+  });
+});

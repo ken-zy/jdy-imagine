@@ -1,4 +1,4 @@
-import { describe, test, expect } from "bun:test";
+import { describe, test, expect, mock, afterEach } from "bun:test";
 import {
   buildRealtimeRequestBody,
   parseGenerateResponse,
@@ -8,6 +8,9 @@ import {
   validateBatchTasks,
   buildChainedRequestBody,
   createGoogleAnchor,
+  buildBatchJsonl,
+  parseJsonlResultLine,
+  createGoogleProvider,
 } from "./google";
 
 describe("mapQualityToImageSize", () => {
@@ -422,5 +425,342 @@ describe("createGoogleAnchor", () => {
 
     const anchor = createGoogleAnchor(firstReq, rawResponse);
     expect(anchor).toBeNull();
+  });
+});
+
+describe("buildBatchJsonl", () => {
+  test("produces valid JSONL with correct keys", () => {
+    const { data, keys } = buildBatchJsonl(
+      "gemini-3.1-flash-image-preview",
+      [
+        { prompt: "A sunset over mountains", model: "test", ar: "16:9", quality: "2k", refs: [], imageSize: "2K" },
+        { prompt: "A cat sleeping", model: "test", ar: null, quality: "normal", refs: [], imageSize: "1K" },
+      ],
+      "test-batch",
+    );
+
+    const text = new TextDecoder().decode(data);
+    const lines = text.trim().split("\n");
+    expect(lines).toHaveLength(2);
+
+    const line1 = JSON.parse(lines[0]);
+    const line2 = JSON.parse(lines[1]);
+
+    expect(line1.key).toMatch(/^001-/);
+    expect(line2.key).toMatch(/^002-/);
+    expect(keys).toEqual([line1.key, line2.key]);
+
+    expect(line1.request.contents[0].parts).toBeDefined();
+    expect(line1.request.generationConfig.responseModalities).toEqual(["IMAGE"]);
+    expect(line1.request.generationConfig.imageConfig.imageSize).toBe("2K");
+    expect(line2.request.generationConfig.imageConfig.imageSize).toBe("1K");
+  });
+
+  test("includes aspect ratio in prompt text", () => {
+    const { data } = buildBatchJsonl(
+      "test-model",
+      [{ prompt: "A cat", model: "test", ar: "16:9", quality: "2k", refs: [], imageSize: "2K" }],
+      "test",
+    );
+
+    const line = JSON.parse(new TextDecoder().decode(data).trim());
+    const textPart = line.request.contents[0].parts.find((p: any) => p.text);
+    expect(textPart.text).toContain("Aspect ratio: 16:9");
+  });
+
+  test("inlines ref images as base64", () => {
+    const { mkdtempSync, writeFileSync } = require("fs");
+    const { join } = require("path");
+    const { tmpdir } = require("os");
+    const dir = mkdtempSync(join(tmpdir(), "jsonl-ref-"));
+    const refPath = join(dir, "ref.png");
+    writeFileSync(refPath, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+
+    const { data } = buildBatchJsonl(
+      "test-model",
+      [{ prompt: "Edit this", model: "test", ar: null, quality: "2k", refs: [refPath], imageSize: "2K" }],
+      "test",
+    );
+
+    const line = JSON.parse(new TextDecoder().decode(data).trim());
+    const parts = line.request.contents[0].parts;
+    expect(parts[0]).toHaveProperty("inlineData");
+    expect(parts[0].inlineData.mimeType).toBe("image/png");
+    expect(parts[1]).toHaveProperty("text");
+  });
+
+  test("returns Uint8Array with trailing newline", () => {
+    const { data } = buildBatchJsonl(
+      "test-model",
+      [{ prompt: "A cat", model: "test", ar: null, quality: "normal", refs: [], imageSize: "1K" }],
+      "test",
+    );
+    const text = new TextDecoder().decode(data);
+    expect(text.endsWith("\n")).toBe(true);
+  });
+});
+
+describe("parseJsonlResultLine", () => {
+  test("parses successful result line", () => {
+    const line = JSON.stringify({
+      key: "001-cat",
+      response: {
+        candidates: [{
+          content: {
+            parts: [{
+              inlineData: {
+                data: Buffer.from("img").toString("base64"),
+                mimeType: "image/png",
+              },
+            }],
+          },
+          finishReason: "STOP",
+        }],
+      },
+    });
+
+    const result = parseJsonlResultLine(line);
+    expect(result).not.toBeNull();
+    expect(result!.key).toBe("001-cat");
+    expect(result!.result?.images).toHaveLength(1);
+  });
+
+  test("parses error result line", () => {
+    const line = JSON.stringify({
+      key: "002-fail",
+      error: { message: "Content blocked" },
+    });
+
+    const result = parseJsonlResultLine(line);
+    expect(result).not.toBeNull();
+    expect(result!.key).toBe("002-fail");
+    expect(result!.error).toBe("Content blocked");
+  });
+
+  test("returns null for malformed JSON", () => {
+    const result = parseJsonlResultLine("not-json{{{");
+    expect(result).toBeNull();
+  });
+
+  test("returns null for empty line", () => {
+    const result = parseJsonlResultLine("");
+    expect(result).toBeNull();
+  });
+
+  test("handles line with response.error (API error)", () => {
+    const line = JSON.stringify({
+      key: "003-err",
+      response: {
+        error: { message: "Internal error" },
+      },
+    });
+
+    const result = parseJsonlResultLine(line);
+    expect(result!.key).toBe("003-err");
+    expect(result!.error).toBe("Internal error");
+  });
+});
+
+describe("batchFetch (file-based)", () => {
+  const originalFetch = globalThis.fetch;
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  test("downloads JSONL and parses results", async () => {
+    const jsonlContent = [
+      JSON.stringify({ key: "001-cat", response: { candidates: [{ content: { parts: [{ inlineData: { data: Buffer.from("img1").toString("base64"), mimeType: "image/png" } }] }, finishReason: "STOP" }] } }),
+      JSON.stringify({ key: "002-dog", response: { candidates: [{ content: { parts: [{ inlineData: { data: Buffer.from("img2").toString("base64"), mimeType: "image/png" } }] }, finishReason: "STOP" }] } }),
+    ].join("\n") + "\n";
+
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+
+      // batchGet — full job response
+      if (url.includes("batches/job1") && !url.includes("/download/")) {
+        return new Response(JSON.stringify({
+          name: "batches/job1",
+          metadata: { state: "JOB_STATE_SUCCEEDED", totalCount: 2, succeededCount: 2, failedCount: 0 },
+          response: { responsesFile: "files/output456" },
+        }), { status: 200 });
+      }
+
+      // downloadJsonl
+      if (url.includes("/download/")) {
+        return new Response(jsonlContent, { status: 200 });
+      }
+
+      return new Response("Not found", { status: 404 });
+    }) as typeof fetch;
+
+    const provider = createGoogleProvider("fake-key", "https://generativelanguage.googleapis.com");
+    const results = await provider.batchFetch!("batches/job1");
+
+    expect(results).toHaveLength(2);
+    expect(results[0].key).toBe("001-cat");
+    expect(results[0].result?.images).toHaveLength(1);
+    expect(results[1].key).toBe("002-dog");
+  });
+
+  test("falls back to inlinedResponses for old inline jobs", async () => {
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+
+      if (url.includes("batches/old-job")) {
+        return new Response(JSON.stringify({
+          name: "batches/old-job",
+          metadata: { state: "JOB_STATE_SUCCEEDED" },
+          response: {
+            inlinedResponses: [{
+              metadata: { key: "001-cat" },
+              response: { candidates: [{ content: { parts: [{ inlineData: { data: Buffer.from("img").toString("base64"), mimeType: "image/png" } }] }, finishReason: "STOP" }] },
+            }],
+          },
+        }), { status: 200 });
+      }
+
+      return new Response("Not found", { status: 404 });
+    }) as typeof fetch;
+
+    const provider = createGoogleProvider("fake-key", "https://generativelanguage.googleapis.com");
+    const results = await provider.batchFetch!("batches/old-job");
+
+    expect(results).toHaveLength(1);
+    expect(results[0].key).toBe("001-cat");
+  });
+
+  test("warns when result count differs from stats.total", async () => {
+    const originalError = console.error;
+    const errors: string[] = [];
+    console.error = (...args: unknown[]) => { errors.push(args.join(" ")); };
+
+    const jsonlContent = JSON.stringify({ key: "001-cat", response: { candidates: [{ content: { parts: [{ inlineData: { data: Buffer.from("img").toString("base64"), mimeType: "image/png" } }] }, finishReason: "STOP" }] } }) + "\n";
+
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+
+      if (!url.includes("/download/")) {
+        return new Response(JSON.stringify({
+          name: "batches/job1",
+          metadata: { state: "JOB_STATE_SUCCEEDED", totalCount: 3, succeededCount: 3, failedCount: 0 },
+          response: { responsesFile: "files/output456" },
+        }), { status: 200 });
+      }
+
+      return new Response(jsonlContent, { status: 200 });
+    }) as typeof fetch;
+
+    const provider = createGoogleProvider("fake-key", "https://generativelanguage.googleapis.com");
+    const results = await provider.batchFetch!("batches/job1");
+
+    expect(results).toHaveLength(1);
+    expect(errors.some(e => e.includes("Expected 3 results, got 1"))).toBe(true);
+
+    console.error = originalError;
+  });
+});
+
+describe("batchCreate (file-based)", () => {
+  const originalFetch = globalThis.fetch;
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  test("uploads JSONL then creates batch with file_name", async () => {
+    const capturedUrls: string[] = [];
+    const capturedBodies: unknown[] = [];
+
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      capturedUrls.push(url);
+
+      // Files API: resumable start
+      if (url.includes("/upload/v1beta/files")) {
+        return new Response(null, {
+          status: 200,
+          headers: { "x-goog-upload-url": "https://upload.example.com/finalize" },
+        });
+      }
+
+      // Files API: upload finalize
+      if (url.includes("upload.example.com/finalize")) {
+        return new Response(JSON.stringify({ file: { name: "files/input789" } }), { status: 200 });
+      }
+
+      // Batch create
+      if (url.includes(":batchGenerateContent")) {
+        if (init?.body) capturedBodies.push(JSON.parse(init.body as string));
+        return new Response(JSON.stringify({
+          name: "batches/job1",
+          metadata: { state: "JOB_STATE_PENDING", createTime: "2026-04-14T00:00:00Z" },
+        }), { status: 200 });
+      }
+
+      return new Response("Not found", { status: 404 });
+    }) as typeof fetch;
+
+    const provider = createGoogleProvider("fake-key", "https://generativelanguage.googleapis.com");
+    const job = await provider.batchCreate!({
+      model: "gemini-3.1-flash-image-preview",
+      tasks: [{ prompt: "A cat", model: "test", ar: null, quality: "normal", refs: [], imageSize: "1K" }],
+    });
+
+    expect(job.id).toBe("batches/job1");
+    expect(job.state).toBe("pending");
+
+    // Verify batch create body uses file_name, NOT inline requests
+    const batchBody = capturedBodies[0] as any;
+    expect(batchBody.batch.input_config.file_name).toBe("files/input789");
+    expect(batchBody.batch.input_config.requests).toBeUndefined();
+  });
+});
+
+describe("batchGet (file-based)", () => {
+  const originalFetch = globalThis.fetch;
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  test("extracts responsesFile from succeeded job", async () => {
+    globalThis.fetch = (async () => {
+      return new Response(JSON.stringify({
+        name: "batches/job1",
+        metadata: {
+          state: "JOB_STATE_SUCCEEDED",
+          createTime: "2026-04-14T00:00:00Z",
+          totalCount: 4,
+          succeededCount: 4,
+          failedCount: 0,
+        },
+        response: {
+          responsesFile: "files/output456",
+        },
+      }), { status: 200 });
+    }) as typeof fetch;
+
+    const provider = createGoogleProvider("fake-key", "https://generativelanguage.googleapis.com");
+    const job = await provider.batchGet!("batches/job1");
+
+    expect(job.state).toBe("succeeded");
+    expect(job.responsesFile).toBe("files/output456");
+    expect(job.stats?.total).toBe(4);
+  });
+
+  test("returns undefined responsesFile for pending job", async () => {
+    globalThis.fetch = (async () => {
+      return new Response(JSON.stringify({
+        name: "batches/job1",
+        metadata: { state: "JOB_STATE_PENDING", createTime: "2026-04-14T00:00:00Z" },
+      }), { status: 200 });
+    }) as typeof fetch;
+
+    const provider = createGoogleProvider("fake-key", "https://generativelanguage.googleapis.com");
+    const job = await provider.batchGet!("batches/job1");
+
+    expect(job.state).toBe("pending");
+    expect(job.responsesFile).toBeUndefined();
   });
 });

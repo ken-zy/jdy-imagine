@@ -1,7 +1,7 @@
 import { execFileSync } from "child_process";
 
-const CONNECT_TIMEOUT = 30_000;
-const TOTAL_TIMEOUT = 300_000;
+export const CONNECT_TIMEOUT = 30_000;
+export const TOTAL_TIMEOUT = 300_000;
 
 export function detectProxy(
   env: Record<string, string | undefined>,
@@ -114,8 +114,8 @@ function curlPost(
   }
 }
 
-const RETRY_DELAYS_HTTP = [1000, 2000, 4000];
-const RETRYABLE_HTTP = new Set([429, 500, 503]);
+export const RETRY_DELAYS_HTTP = [1000, 2000, 4000];
+export const RETRYABLE_HTTP = new Set([429, 500, 503]);
 
 async function withRetry(
   fn: () => Promise<HttpResponse>,
