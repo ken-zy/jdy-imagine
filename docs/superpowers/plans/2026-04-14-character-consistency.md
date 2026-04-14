@@ -4,7 +4,7 @@
 
 **Goal:** Add `--character` (character bible injection) and `--chain` (star-anchored multi-turn) to jdy-imagine for consistent character generation across multiple images.
 
-**Architecture:** Character profile is a standalone module with two injection functions: `applyCharacterPrompt` (description+negative → prompt prefix, always applied) and `applyCharacterRefs` (reference images → refs merge, skipped for chain tasks 2..N since character refs are already in the anchor's first user turn). Chain mode is Google-provider-internal: preserves raw API response parts including `thoughtSignature` for multi-turn replay. Provider interface gets opaque `ChainAnchor` + optional `generateAndAnchor`/`generateChained` methods — no hidden contracts.
+**Architecture:** Character profile is a standalone module with two injection functions: `applyCharacterPrompt` (description+negative → prompt prefix, always applied) and `mergeCharacterRefs` (reference images → refs merge, skipped for chain tasks 2..N since character refs are already in the anchor's first user turn). Chain mode is Google-provider-internal: preserves raw API response parts including `thoughtSignature` for multi-turn replay. Provider interface gets opaque `ChainAnchor` + optional `generateAndAnchor`/`generateChained` methods — no hidden contracts.
 
 **Tech Stack:** TypeScript, Bun, Google Gemini API (`generateContent` with multi-turn `contents`)
 
@@ -80,11 +80,9 @@ Expected: FAIL — module `./character` not found
 
 - [ ] **Step 3: Write failing tests for applyCharacterPrompt and mergeCharacterRefs**
 
-Append to `scripts/lib/character.test.ts`:
+Append test cases to `scripts/lib/character.test.ts` (imports already present from Step 1):
 
 ```typescript
-import { applyCharacterPrompt, mergeCharacterRefs } from "./character";
-
 describe("applyCharacterPrompt", () => {
   test("prepends description and negative to prompt", () => {
     const result = applyCharacterPrompt("wearing red dress", {

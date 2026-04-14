@@ -61,16 +61,19 @@ interface CharacterProfile {
 }
 
 function loadCharacter(filePath: string): CharacterProfile;
-function applyCharacter(
-  prompt: string,
-  refs: string[],
-  character: CharacterProfile,
-): { prompt: string; refs: string[] };
+
+// Prompt injection only (always applied, all modes, all tasks)
+function applyCharacterPrompt(prompt: string, character: CharacterProfile): string;
+
+// Ref merge only (skipped for chain tasks 2..N — character refs already in anchor)
+function mergeCharacterRefs(taskRefs: string[], character: CharacterProfile): string[];
 ```
 
 `loadCharacter`: reads JSON, validates `description` is present, resolves reference paths relative to the JSON file's directory. Throws on missing file or missing `description`.
 
-`applyCharacter`: prepends `description` + `negative` to prompt, merges character references before task refs (with dedup).
+`applyCharacterPrompt`: prepends `description` + `negative` to prompt. Applied to every task in both realtime and batch modes.
+
+`mergeCharacterRefs`: prepends character references before task refs with dedup. In chain mode, only called for the first task — subsequent tasks already have character refs in the anchor's first user turn.
 
 ## Chain Mode
 
@@ -124,29 +127,22 @@ type ChainAnchor = unknown;
 interface Provider {
   // ...existing methods
 
-  // Chain support (optional)
+  // Chain support (optional — provider-specific)
+  // First task: generate + create anchor in one call (no hidden contracts)
+  generateAndAnchor?(req: GenerateRequest): Promise<{
+    result: GenerateResult;
+    anchor: ChainAnchor;
+  }>;
+  // Subsequent tasks: generate using anchor
   generateChained?(req: GenerateRequest, anchor: ChainAnchor): Promise<GenerateResult>;
-  createAnchor?(firstReq: GenerateRequest, rawResponse: unknown): ChainAnchor;
 }
 ```
 
-`generate.ts` calls `provider.generate()` for the first task, then `provider.createAnchor()` to capture the anchor from the raw response, then `provider.generateChained()` for subsequent tasks. The anchor is opaque to the orchestrator.
+`generate.ts` calls `provider.generateAndAnchor()` for the first task (returns both the result and an opaque anchor), then `provider.generateChained()` for subsequent tasks. No hidden contracts — all chain capabilities are in the public Provider interface.
 
 ### Raw Response Preservation
 
-To support `createAnchor`, the Google provider's `generate()` method must return the raw API response alongside the parsed `GenerateResult`. Implementation approach: `generate()` continues to return `GenerateResult` as before. A separate internal method captures the raw response for anchor creation. Specifically:
-
-```typescript
-// Google provider internal
-async function generateWithRaw(req: GenerateRequest): Promise<{
-  result: GenerateResult;
-  rawResponse: unknown;  // full API response JSON
-}>;
-```
-
-`generate()` wraps `generateWithRaw()` and returns only `result`. When chain mode is active, `generate.ts` calls `generateWithRaw()` directly for the first task (via a provider-specific cast), then passes `rawResponse` to `createAnchor()`.
-
-Alternative (cleaner): `createAnchor` is called with the `GenerateRequest` and the provider re-sends a lightweight probe. But this wastes an API call. The `generateWithRaw` approach is preferred despite the slightly awkward cast.
+The Google provider internally refactors `generate()` into a `generateCore()` that returns both `GenerateResult` and the raw API response. `generate()` wraps it and returns only the result. `generateAndAnchor()` calls `generateCore()`, then uses the raw response to create the anchor — all within the provider, no hidden contracts exposed to the orchestrator.
 
 ### Request Construction with Anchor
 
@@ -236,10 +232,10 @@ bun scripts/main.ts batch submit prompts.json --character model-a.json
 
 | File | Change |
 |------|--------|
-| `scripts/lib/character.ts` | **New** — CharacterProfile type, loadCharacter, applyCharacter |
+| `scripts/lib/character.ts` | **New** — CharacterProfile type, loadCharacter, applyCharacterPrompt, mergeCharacterRefs |
 | `scripts/lib/args.ts` | Add `--chain` and `--character` flag parsing |
-| `scripts/providers/types.ts` | Add `ChainAnchor` opaque type, `generateChained?` and `createAnchor?` optional methods to Provider |
-| `scripts/providers/google.ts` | Add `GoogleChainAnchor` type, `generateWithRaw`, implement `generateChained` and `createAnchor`; preserve raw response parts including `thoughtSignature` |
+| `scripts/providers/types.ts` | Add `ChainAnchor` opaque type, `generateAndAnchor?` and `generateChained?` optional methods to Provider |
+| `scripts/providers/google.ts` | Add `GoogleChainAnchor` type, refactor to `generateCore`, implement `generateAndAnchor` and `generateChained`; preserve raw response parts including `thoughtSignature` |
 | `scripts/commands/generate.ts` | Chain orchestration (first-image guard, anchor creation, chained generation) + character injection |
 | `scripts/commands/batch.ts` | Character injection + `--chain` warning + payload estimation guardrail for character refs |
 | `scripts/main.ts` | Pass new flags through |
