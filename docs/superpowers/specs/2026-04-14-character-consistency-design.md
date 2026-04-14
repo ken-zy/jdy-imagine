@@ -96,9 +96,9 @@ Chain state is **not** exposed in the provider-level `GenerateRequest` interface
 
 Instead, chain mode is implemented as follows:
 
-1. **`generate.ts`** orchestrates the chain: calls `provider.generate()` for the first task, then calls a new Google-specific method `provider.generateChained()` for subsequent tasks.
+1. **`generate.ts`** orchestrates the chain: calls `provider.generateAndAnchor()` for the first task (returns both result and opaque anchor), then calls `provider.generateChained()` for subsequent tasks.
 2. **`google.ts`** owns the chain state internally: it preserves the raw first-turn request parts and raw model response parts (including `thoughtSignature`), and constructs multi-turn `contents` from them.
-3. **`Provider` interface** gains one optional method: `generateChained?(req: GenerateRequest, anchor: ChainAnchor): Promise<GenerateResult>`, where `ChainAnchor` is an opaque type returned by the provider.
+3. **`Provider` interface** gains two optional methods: `generateAndAnchor?(req): Promise<{result, anchor}>` and `generateChained?(req, anchor): Promise<GenerateResult>`, where `ChainAnchor` is an opaque type.
 
 ### Thought Signatures
 

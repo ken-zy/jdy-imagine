@@ -423,7 +423,7 @@ git commit -m "feat(types): add ChainAnchor opaque type and optional chain metho
 - Modify: `scripts/providers/google.ts`
 - Modify: `scripts/providers/google.test.ts`
 
-- [ ] **Step 1: Write failing tests for generateWithRaw**
+- [ ] **Step 1: Write failing tests for chained request construction**
 
 Append to `scripts/providers/google.test.ts`:
 
