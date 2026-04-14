@@ -13,6 +13,8 @@ export interface ParsedArgs {
     outdir: string;
     json: boolean;
     async: boolean;
+    chain: boolean;
+    character?: string;
   };
 }
 
@@ -23,6 +25,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
       outdir: ".",
       json: false,
       async: false,
+      chain: false,
     },
   };
 
@@ -90,6 +93,12 @@ export function parseArgs(argv: string[]): ParsedArgs {
         break;
       case "--async":
         result.flags.async = true;
+        break;
+      case "--chain":
+        result.flags.chain = true;
+        break;
+      case "--character":
+        result.flags.character = nextVal(arg);
         break;
       default:
         // Unknown flag — skip
