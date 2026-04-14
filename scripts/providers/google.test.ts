@@ -151,11 +151,11 @@ describe("validateBatchTasks", () => {
     expect(() => validateBatchTasks(tasks)).not.toThrow();
   });
 
-  test("rejects tasks with refs", () => {
+  test("accepts tasks with refs", () => {
     const tasks = [
       { prompt: "Edit this", model: "test", ar: null, quality: "2k" as const, refs: ["a.png"], imageSize: "2K" as const },
     ];
-    expect(() => validateBatchTasks(tasks)).toThrow("Batch mode does not support reference images in v0.1");
+    expect(() => validateBatchTasks(tasks)).not.toThrow();
   });
 });
 
@@ -172,6 +172,32 @@ describe("buildBatchRequestBody", () => {
     expect(body.batch.input_config.requests.requests).toHaveLength(1);
     const req = body.batch.input_config.requests.requests[0];
     expect(req.metadata.key).toMatch(/^001-/);
+  });
+
+  test("inlines ref images as base64 in batch request", () => {
+    // Create a temp ref image
+    const { mkdtempSync, writeFileSync } = require("fs");
+    const { join } = require("path");
+    const { tmpdir } = require("os");
+    const dir = mkdtempSync(join(tmpdir(), "jdy-imagine-ref-"));
+    const refPath = join(dir, "ref.png");
+    writeFileSync(refPath, Buffer.from([0x89, 0x50, 0x4e, 0x47])); // PNG magic bytes
+
+    const body = buildBatchRequestBody(
+      "gemini-3.1-flash-image-preview",
+      [
+        { prompt: "Make it blue", model: "test", ar: null, quality: "2k", refs: [refPath], imageSize: "2K" },
+      ],
+      "test-batch",
+    );
+
+    const parts = body.batch.input_config.requests.requests[0].request.contents[0].parts;
+    // First part should be inlineData (ref image), second should be text
+    expect(parts).toHaveLength(2);
+    expect(parts[0]).toHaveProperty("inlineData");
+    expect((parts[0] as any).inlineData.mimeType).toBe("image/png");
+    expect(parts[1]).toHaveProperty("text");
+    expect((parts[1] as any).text).toBe("Make it blue");
   });
 });
 
