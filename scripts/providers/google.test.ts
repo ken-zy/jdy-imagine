@@ -1,4 +1,4 @@
-import { describe, test, expect } from "bun:test";
+import { describe, test, expect, mock, afterEach } from "bun:test";
 import {
   buildRealtimeRequestBody,
   parseGenerateResponse,
@@ -10,6 +10,7 @@ import {
   createGoogleAnchor,
   buildBatchJsonl,
   parseJsonlResultLine,
+  createGoogleProvider,
 } from "./google";
 
 describe("mapQualityToImageSize", () => {
@@ -557,5 +558,61 @@ describe("parseJsonlResultLine", () => {
     const result = parseJsonlResultLine(line);
     expect(result!.key).toBe("003-err");
     expect(result!.error).toBe("Internal error");
+  });
+});
+
+describe("batchCreate (file-based)", () => {
+  const originalFetch = globalThis.fetch;
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  test("uploads JSONL then creates batch with file_name", async () => {
+    const capturedUrls: string[] = [];
+    const capturedBodies: unknown[] = [];
+
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      capturedUrls.push(url);
+
+      // Files API: resumable start
+      if (url.includes("/upload/v1beta/files")) {
+        return new Response(null, {
+          status: 200,
+          headers: { "x-goog-upload-url": "https://upload.example.com/finalize" },
+        });
+      }
+
+      // Files API: upload finalize
+      if (url.includes("upload.example.com/finalize")) {
+        return new Response(JSON.stringify({ file: { name: "files/input789" } }), { status: 200 });
+      }
+
+      // Batch create
+      if (url.includes(":batchGenerateContent")) {
+        if (init?.body) capturedBodies.push(JSON.parse(init.body as string));
+        return new Response(JSON.stringify({
+          name: "batches/job1",
+          metadata: { state: "JOB_STATE_PENDING", createTime: "2026-04-14T00:00:00Z" },
+        }), { status: 200 });
+      }
+
+      return new Response("Not found", { status: 404 });
+    }) as typeof fetch;
+
+    const provider = createGoogleProvider("fake-key", "https://generativelanguage.googleapis.com");
+    const job = await provider.batchCreate!({
+      model: "gemini-3.1-flash-image-preview",
+      tasks: [{ prompt: "A cat", model: "test", ar: null, quality: "normal", refs: [], imageSize: "1K" }],
+    });
+
+    expect(job.id).toBe("batches/job1");
+    expect(job.state).toBe("pending");
+
+    // Verify batch create body uses file_name, NOT inline requests
+    const batchBody = capturedBodies[0] as any;
+    expect(batchBody.batch.input_config.file_name).toBe("files/input789");
+    expect(batchBody.batch.input_config.requests).toBeUndefined();
   });
 });

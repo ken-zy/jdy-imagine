@@ -1,5 +1,6 @@
 import { readFileSync } from "fs";
 import { httpPost, httpGet, httpPostWithRetry, httpGetWithRetry } from "../lib/http";
+import { uploadJsonl } from "../lib/files";
 import { generateSlug } from "../lib/output";
 import type {
   GenerateRequest,
@@ -459,16 +460,25 @@ export function createGoogleProvider(
       validateBatchTasks(req.tasks);
 
       const displayName = req.displayName ?? `jdy-imagine-${Date.now()}`;
-      const body = buildBatchRequestBody(req.model, req.tasks, displayName);
+      const { data } = buildBatchJsonl(req.model, req.tasks, displayName);
 
-      const payloadSize = JSON.stringify(body).length;
-      if (payloadSize > 20 * 1024 * 1024) {
-        throw new Error(
-          "Batch payload exceeds 20MB. Split into smaller batches.",
-        );
+      // Soft warning for large payloads (file input supports up to 2GB)
+      const payloadMB = data.byteLength / (1024 * 1024);
+      if (payloadMB > 50) {
+        console.error(`Warning: Large payload (~${Math.round(payloadMB)}MB), upload may take a while.`);
       }
 
+      // Upload JSONL via Files API
+      const fileName = await uploadJsonl(data, displayName, apiKey, baseUrl);
+
+      // Create batch with file reference
       const url = `${baseUrl}/v1beta/models/${req.model}:batchGenerateContent`;
+      const body = {
+        batch: {
+          display_name: displayName,
+          input_config: { file_name: fileName },
+        },
+      };
       const res = await httpPostWithRetry(url, body, apiKey);
 
       if (res.status !== 200) {
@@ -476,14 +486,14 @@ export function createGoogleProvider(
         throw new Error(errData?.error?.message ?? `HTTP ${res.status}`);
       }
 
-      const data = res.data as {
+      const respData = res.data as {
         name?: string;
         metadata?: { state?: string; createTime?: string };
       };
       return {
-        id: data.name ?? "",
-        state: (data.metadata?.state?.toLowerCase() ?? "pending") as BatchJob["state"],
-        createTime: data.metadata?.createTime ?? new Date().toISOString(),
+        id: respData.name ?? "",
+        state: (respData.metadata?.state?.toLowerCase().replace(/^(job_state_|batch_state_)/, "") ?? "pending") as BatchJob["state"],
+        createTime: respData.metadata?.createTime ?? new Date().toISOString(),
       };
     },
 
