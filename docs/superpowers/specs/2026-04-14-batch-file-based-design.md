@@ -90,6 +90,8 @@ GET {baseUrl}/download/v1beta/{fileName}:download?alt=media
 - 上传：两次 `execFileSync`，Step 1 用 `-D` dump headers
 - 下载：`execFileSync` 拿 stdout → 按 `\n` split → 回调
 
+**已知限制**：proxy 路径使用 `execFileSync` 全量缓冲 stdout，受 Node/Bun 的 `maxBuffer`（当前 50MB）限制。对于包含 40+ 个 2K 图片 task 的超大 batch，proxy 路径的结果文件可能超过此限制。当前实际使用场景（4-20 个 task）不会触发。如未来需支持更大 batch，需将 proxy 下载改为 `spawn` + 流式读取。
+
 #### 超时
 
 - 上传：300s（与现有 TOTAL_TIMEOUT 一致）
@@ -98,6 +100,16 @@ GET {baseUrl}/download/v1beta/{fileName}:download?alt=media
 #### 重试
 
 复用 `RETRY_DELAYS_HTTP = [1000, 2000, 4000]` 策略。上传和下载均支持重试。
+
+#### 共享 transport 常量
+
+`http.ts` 需导出以下常量供 `files.ts` import，避免 transport policy 分叉：
+- `CONNECT_TIMEOUT`（30s）
+- `TOTAL_TIMEOUT`（300s）
+- `RETRY_DELAYS_HTTP`
+- `RETRYABLE_HTTP`（Set<number>）
+
+`files.ts` import 这些常量，下载超时单独定义为 `DOWNLOAD_TIMEOUT = 600_000`（覆盖 `TOTAL_TIMEOUT`）。
 
 ### 改造：`scripts/providers/google.ts`
 
@@ -138,11 +150,41 @@ POST /v1beta/models/{model}:batchGenerateContent
 解析响应 → BatchJob { id, state, createTime }
 ```
 
-Payload 校验：保留 20MB 检查（对 JSONL data 字节长度），错误消息更新。
+Payload 校验：移除原有 20MB 硬限制（那是 inline request 的限制，file input 上限 2GB）。改为 soft warning：JSONL 超过 50MB 时提示"Large payload ({size}MB), upload may take a while"。命令层 `batch.ts` 的估算检查同步调高阈值至 100MB。
 
 #### `batchGet()` — 扩展
 
 新增提取 `response.responsesFile` 字段，存入 `BatchJob.responsesFile`。
+
+Batch job GET 响应的真实 JSON 结构（file-based 模式）：
+```json
+{
+  "name": "batches/abc123",
+  "metadata": {
+    "state": "JOB_STATE_SUCCEEDED",
+    "createTime": "2026-04-14T10:00:00Z",
+    "totalCount": 4,
+    "succeededCount": 4,
+    "failedCount": 0
+  },
+  "response": {
+    "responsesFile": "files/output456"
+  }
+}
+```
+
+对比 inline 模式的响应：
+```json
+{
+  "name": "batches/abc123",
+  "metadata": { "state": "JOB_STATE_SUCCEEDED", ... },
+  "response": {
+    "inlinedResponses": [ ... ]
+  }
+}
+```
+
+字段路径以 REST API 为准（`response.responsesFile`），不是 Python SDK 的 `dest.file_name`。
 
 #### `batchFetch()` — 新流程
 
@@ -168,6 +210,14 @@ Step 2: 检查响应结构
 - 有 `error` → `BatchResult { key, error: message }`
 - 解析失败 → warning log，跳过该行，不中断整体流程
 
+#### 结果完整性校验
+
+`batchFetch()` 返回 `BatchResult[]` 后，调用方（或 `batchFetch` 内部）需校验结果完整性：
+- 对比 `batch stats.total`（从 `batchGet` 获取）与实际解析的结果数
+- 如果 `解析结果数 < stats.total`，输出 warning："Expected {total} results, got {actual}. {diff} results may be missing."
+- 不 exit 非零（可能部分结果仍有价值），但确保用户明确知道有数据缺失
+- 如果 `stats` 不可用（旧 inline job fallback），跳过此校验
+
 ### 类型变更：`scripts/providers/types.ts`
 
 ```typescript
@@ -185,9 +235,12 @@ export interface BatchJob {
 ### 不变的部分
 
 - **Provider 接口**：`batchCreate()`, `batchGet()`, `batchFetch()` 签名和返回类型不变
-- **命令层**：`batch.ts` 的 `batchSubmit()`, `pollAndFetch()`, `writeResults()` 零改动
+- **命令层**：`batch.ts` 的 `batchSubmit()`, `pollAndFetch()`, `writeResults()` 基本不变（仅调高 payload 估算阈值至 100MB）
 - **Manifest 格式**：不变
-- **`http.ts`**：不变
+
+### 小幅变更
+
+- **`http.ts`**：导出 `CONNECT_TIMEOUT`、`TOTAL_TIMEOUT`、`RETRY_DELAYS_HTTP`、`RETRYABLE_HTTP` 常量（加 `export` 关键字，不改值）
 
 ### 向后兼容
 
