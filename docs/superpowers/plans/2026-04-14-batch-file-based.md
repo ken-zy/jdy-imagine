@@ -260,19 +260,24 @@ export async function uploadJsonl(
   baseUrl: string,
 ): Promise<string> {
   const proxy = detectProxy(process.env as Record<string, string>);
-  if (proxy) {
-    return curlUploadJsonl(data, displayName, apiKey, baseUrl, proxy);
-  }
-  return fetchUploadJsonl(data, displayName, apiKey, baseUrl);
+  // Retry wraps BOTH paths — proxy and fetch
+  return withRetry(async () => {
+    if (proxy) {
+      return curlUploadJsonl(data, displayName, apiKey, baseUrl, proxy);
+    }
+    return fetchUploadJsonlInner(data, displayName, apiKey, baseUrl);
+  }, (err) => {
+    const e = err as { retryable?: boolean; name?: string };
+    return e.retryable === true || e.name === "AbortError" || (err instanceof TypeError);
+  });
 }
 
-async function fetchUploadJsonl(
+async function fetchUploadJsonlInner(
   data: Uint8Array,
   displayName: string,
   apiKey: string,
   baseUrl: string,
 ): Promise<string> {
-  return withRetry(async () => {
     // Step 1: initiate resumable upload
     const startUrl = `${baseUrl}/upload/v1beta/files`;
     const controller1 = new AbortController();
@@ -331,11 +336,6 @@ async function fetchUploadJsonl(
     } finally {
       clearTimeout(timeout2);
     }
-  }, (err) => {
-    const e = err as { retryable?: boolean; name?: string };
-    // Retry on explicit retryable flag (HTTP 429/500/503) or network errors
-    return e.retryable === true || e.name === "AbortError" || (err instanceof TypeError);
-  });
 }
 
 function curlUploadJsonl(
@@ -1055,7 +1055,7 @@ In `scripts/providers/google.ts`, modify the `batchCreate` method inside `create
       };
       return {
         id: respData.name ?? "",
-        state: (respData.metadata?.state?.toLowerCase().replace("job_state_", "") ?? "pending") as BatchJob["state"],
+        state: (respData.metadata?.state?.toLowerCase().replace(/^(job_state_|batch_state_)/, "") ?? "pending") as BatchJob["state"],
         createTime: respData.metadata?.createTime ?? new Date().toISOString(),
       };
     },
@@ -1085,7 +1085,10 @@ git commit -m "feat(google): rewire batchCreate to file-based input via Files AP
 
 **Files:**
 - Modify: `scripts/providers/google.ts:402-433`
+- Modify: `scripts/providers/google.ts:465` (batchList — update state prefix for consistency)
 - Modify: `scripts/providers/google.test.ts`
+
+**Note:** The state normalization regex `.replace(/^(job_state_|batch_state_)/, "")` handles both prefix formats (REST API uses `JOB_STATE_`, some responses may use `BATCH_STATE_`). Also update the existing `batchList()` method at google.ts:465 to use the same regex for consistency (currently uses `batch_state_` only).
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1176,7 +1179,7 @@ In `scripts/providers/google.ts`, modify the `batchGet` method:
       };
       return {
         id: data.name ?? jobId,
-        state: (data.metadata?.state?.toLowerCase().replace("job_state_", "") ?? "pending") as BatchJob["state"],
+        state: (data.metadata?.state?.toLowerCase().replace(/^(job_state_|batch_state_)/, "") ?? "pending") as BatchJob["state"],
         createTime: data.metadata?.createTime ?? "",
         stats: data.metadata?.totalCount != null
           ? {
