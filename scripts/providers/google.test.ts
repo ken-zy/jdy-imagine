@@ -561,6 +561,106 @@ describe("parseJsonlResultLine", () => {
   });
 });
 
+describe("batchFetch (file-based)", () => {
+  const originalFetch = globalThis.fetch;
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  test("downloads JSONL and parses results", async () => {
+    const jsonlContent = [
+      JSON.stringify({ key: "001-cat", response: { candidates: [{ content: { parts: [{ inlineData: { data: Buffer.from("img1").toString("base64"), mimeType: "image/png" } }] }, finishReason: "STOP" }] } }),
+      JSON.stringify({ key: "002-dog", response: { candidates: [{ content: { parts: [{ inlineData: { data: Buffer.from("img2").toString("base64"), mimeType: "image/png" } }] }, finishReason: "STOP" }] } }),
+    ].join("\n") + "\n";
+
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+
+      // batchGet — full job response
+      if (url.includes("batches/job1") && !url.includes("/download/")) {
+        return new Response(JSON.stringify({
+          name: "batches/job1",
+          metadata: { state: "JOB_STATE_SUCCEEDED", totalCount: 2, succeededCount: 2, failedCount: 0 },
+          response: { responsesFile: "files/output456" },
+        }), { status: 200 });
+      }
+
+      // downloadJsonl
+      if (url.includes("/download/")) {
+        return new Response(jsonlContent, { status: 200 });
+      }
+
+      return new Response("Not found", { status: 404 });
+    }) as typeof fetch;
+
+    const provider = createGoogleProvider("fake-key", "https://generativelanguage.googleapis.com");
+    const results = await provider.batchFetch!("batches/job1");
+
+    expect(results).toHaveLength(2);
+    expect(results[0].key).toBe("001-cat");
+    expect(results[0].result?.images).toHaveLength(1);
+    expect(results[1].key).toBe("002-dog");
+  });
+
+  test("falls back to inlinedResponses for old inline jobs", async () => {
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+
+      if (url.includes("batches/old-job")) {
+        return new Response(JSON.stringify({
+          name: "batches/old-job",
+          metadata: { state: "JOB_STATE_SUCCEEDED" },
+          response: {
+            inlinedResponses: [{
+              metadata: { key: "001-cat" },
+              response: { candidates: [{ content: { parts: [{ inlineData: { data: Buffer.from("img").toString("base64"), mimeType: "image/png" } }] }, finishReason: "STOP" }] },
+            }],
+          },
+        }), { status: 200 });
+      }
+
+      return new Response("Not found", { status: 404 });
+    }) as typeof fetch;
+
+    const provider = createGoogleProvider("fake-key", "https://generativelanguage.googleapis.com");
+    const results = await provider.batchFetch!("batches/old-job");
+
+    expect(results).toHaveLength(1);
+    expect(results[0].key).toBe("001-cat");
+  });
+
+  test("warns when result count differs from stats.total", async () => {
+    const originalError = console.error;
+    const errors: string[] = [];
+    console.error = (...args: unknown[]) => { errors.push(args.join(" ")); };
+
+    const jsonlContent = JSON.stringify({ key: "001-cat", response: { candidates: [{ content: { parts: [{ inlineData: { data: Buffer.from("img").toString("base64"), mimeType: "image/png" } }] }, finishReason: "STOP" }] } }) + "\n";
+
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+
+      if (!url.includes("/download/")) {
+        return new Response(JSON.stringify({
+          name: "batches/job1",
+          metadata: { state: "JOB_STATE_SUCCEEDED", totalCount: 3, succeededCount: 3, failedCount: 0 },
+          response: { responsesFile: "files/output456" },
+        }), { status: 200 });
+      }
+
+      return new Response(jsonlContent, { status: 200 });
+    }) as typeof fetch;
+
+    const provider = createGoogleProvider("fake-key", "https://generativelanguage.googleapis.com");
+    const results = await provider.batchFetch!("batches/job1");
+
+    expect(results).toHaveLength(1);
+    expect(errors.some(e => e.includes("Expected 3 results, got 1"))).toBe(true);
+
+    console.error = originalError;
+  });
+});
+
 describe("batchCreate (file-based)", () => {
   const originalFetch = globalThis.fetch;
 

@@ -1,6 +1,6 @@
 import { readFileSync } from "fs";
 import { httpPost, httpGet, httpPostWithRetry, httpGetWithRetry } from "../lib/http";
-import { uploadJsonl } from "../lib/files";
+import { uploadJsonl, downloadJsonl } from "../lib/files";
 import { generateSlug } from "../lib/output";
 import type {
   GenerateRequest,
@@ -536,6 +536,7 @@ export function createGoogleProvider(
     },
 
     async batchFetch(jobId: string): Promise<BatchResult[]> {
+      // Step 1: get full batch job response
       const url = `${baseUrl}/v1beta/${jobId}`;
       const res = await httpGetWithRetry(url, apiKey);
 
@@ -544,8 +545,44 @@ export function createGoogleProvider(
         throw new Error(errData?.error?.message ?? `HTTP ${res.status}`);
       }
 
-      const data = res.data as { response?: Record<string, unknown> };
-      return parseBatchResponse(data.response ?? data as Parameters<typeof parseBatchResponse>[0]);
+      const data = res.data as {
+        metadata?: { totalCount?: number; state?: string };
+        response?: {
+          responsesFile?: string;
+          inlinedResponses?: Array<{
+            metadata?: { key?: string };
+            response?: Record<string, unknown>;
+          }>;
+        };
+      };
+
+      const expectedTotal = data.metadata?.totalCount;
+
+      // Step 2: file-based path
+      if (data.response?.responsesFile) {
+        const results: BatchResult[] = [];
+        await downloadJsonl(data.response.responsesFile, apiKey, baseUrl, (line) => {
+          const result = parseJsonlResultLine(line);
+          if (result) results.push(result);
+        });
+
+        // Completeness check
+        if (expectedTotal != null && results.length < expectedTotal) {
+          console.error(
+            `Warning: Expected ${expectedTotal} results, got ${results.length}. ${expectedTotal - results.length} results may be missing.`,
+          );
+        }
+
+        return results;
+      }
+
+      // Step 2b: inline fallback for old jobs
+      if (data.response?.inlinedResponses) {
+        return parseBatchResponse(data.response as Parameters<typeof parseBatchResponse>[0]);
+      }
+
+      const state = data.metadata?.state ?? "unknown";
+      throw new Error(`Batch job has no result file. Job state: ${state}`);
     },
 
     async batchList(): Promise<BatchJob[]> {
