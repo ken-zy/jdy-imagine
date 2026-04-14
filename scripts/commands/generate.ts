@@ -121,6 +121,7 @@ export async function runGenerate(
   }
 
   let anchor: ChainAnchor | undefined;
+  let hasAnchor = false;
 
   let seq = nextSeqNumber(flags.outdir);
 
@@ -139,7 +140,7 @@ export async function runGenerate(
 
     let result: GenerateResult;
 
-    if (useChain && !isFirstTask && anchor) {
+    if (useChain && !isFirstTask && hasAnchor) {
       // Chained generation: use anchor
       if (!provider.generateChained) {
         throw new Error(`Provider ${provider.name} does not support chain mode`);
@@ -189,6 +190,7 @@ export async function runGenerate(
       }
 
       anchor = newAnchor;
+      hasAnchor = true;
     } else {
       // Normal (non-chain) generation
       result = await provider.generate(req);
