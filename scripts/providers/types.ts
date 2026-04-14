@@ -45,12 +45,18 @@ export interface BatchResult {
   error?: string;
 }
 
+export type ChainAnchor = unknown;
+
 export interface Provider {
   name: string;
   defaultModel: string;
 
   // Realtime
   generate(req: GenerateRequest): Promise<GenerateResult>;
+
+  // Chain (optional – character-consistency)
+  generateAndAnchor?(req: GenerateRequest): Promise<{ result: GenerateResult; anchor: ChainAnchor }>;
+  generateChained?(req: GenerateRequest, anchor: ChainAnchor): Promise<GenerateResult>;
 
   // Batch (optional)
   batchCreate?(req: BatchCreateRequest): Promise<BatchJob>;

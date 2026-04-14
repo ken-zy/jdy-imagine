@@ -6,6 +6,7 @@ import type {
   BatchJob,
   BatchResult,
   Provider,
+  ChainAnchor,
 } from "./types";
 
 describe("Provider types", () => {
@@ -66,5 +67,29 @@ describe("Provider types", () => {
       stats: { total: 2, succeeded: 2, failed: 0 },
     };
     expect(job.state).toBe("succeeded");
+  });
+
+  test("ChainAnchor is opaque and accepts any value", () => {
+    const str: ChainAnchor = "session-abc";
+    const num: ChainAnchor = 42;
+    const obj: ChainAnchor = { token: "xyz", seed: 123 };
+    const nil: ChainAnchor = null;
+    expect(str).toBe("session-abc");
+    expect(num).toBe(42);
+    expect(obj).toEqual({ token: "xyz", seed: 123 });
+    expect(nil).toBeNull();
+  });
+
+  test("generateAndAnchor and generateChained are optional on Provider", () => {
+    const minimal: Provider = {
+      name: "test",
+      defaultModel: "test-model",
+      generate: async (_req: GenerateRequest) => ({
+        images: [],
+        finishReason: "STOP",
+      }),
+    };
+    expect(minimal.generateAndAnchor).toBeUndefined();
+    expect(minimal.generateChained).toBeUndefined();
   });
 });
