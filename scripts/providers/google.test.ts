@@ -764,3 +764,73 @@ describe("batchGet (file-based)", () => {
     expect(job.responsesFile).toBeUndefined();
   });
 });
+
+describe("createGoogleProvider editTarget fallback", () => {
+  const originalFetch = globalThis.fetch;
+  afterEach(() => { globalThis.fetch = originalFetch; });
+
+  test("editTarget non-empty: prepends as refs[0]", async () => {
+    let capturedBody: any;
+    globalThis.fetch = mock(async (_url: any, init: any) => {
+      capturedBody = JSON.parse(init.body);
+      return new Response(JSON.stringify({
+        candidates: [{ content: { parts: [] }, finishReason: "STOP" }],
+      }), { status: 200 });
+    }) as any;
+
+    const tmpRef = "/tmp/jdy-google-fallback-ref.png";
+    const tmpEdit = "/tmp/jdy-google-fallback-edit.png";
+    await Bun.write(tmpRef, new Uint8Array([0x89, 0x50, 0x4E, 0x47]));
+    await Bun.write(tmpEdit, new Uint8Array([0x89, 0x50, 0x4E, 0x47]));
+
+    const provider = createGoogleProvider({ apiKey: "k", baseUrl: "https://x.test", model: "m" });
+    await provider.generate({
+      prompt: "test",
+      model: "m",
+      ar: null,
+      quality: "normal",
+      refs: [tmpRef],
+      imageSize: "1K",
+      editTarget: tmpEdit,
+    });
+
+    // editTarget should be parts[0].inlineData; tmpRef parts[1]; prompt text last
+    const parts = capturedBody.contents[0].parts;
+    expect(parts.length).toBeGreaterThanOrEqual(3);
+    expect(parts[0].inlineData).toBeDefined();
+    expect(parts[1].inlineData).toBeDefined();
+    expect(parts[parts.length - 1].text).toBe("test");
+  });
+});
+
+describe("createGoogleProvider mask rejection", () => {
+  test("mask non-empty: throws", async () => {
+    const provider = createGoogleProvider({ apiKey: "k", baseUrl: "https://x.test", model: "m" });
+    await expect(provider.generate({
+      prompt: "x",
+      model: "m",
+      ar: null,
+      quality: "normal",
+      refs: [],
+      imageSize: "1K",
+      mask: "/tmp/m.png",
+    })).rejects.toThrow(/Google.*does not support.*mask/i);
+  });
+});
+
+describe("createGoogleProvider new factory signature", () => {
+  test("accepts ProviderConfig object", () => {
+    const provider = createGoogleProvider({
+      apiKey: "k",
+      baseUrl: "https://x.test",
+      model: "m",
+    });
+    expect(provider.name).toBe("google");
+    expect(provider.defaultModel).toBe("gemini-3.1-flash-image-preview");
+  });
+
+  test("legacy two-arg signature still works", () => {
+    const provider = createGoogleProvider("k", "https://x.test");
+    expect(provider.name).toBe("google");
+  });
+});

@@ -2,9 +2,9 @@ import { parseArgs } from "./lib/args";
 import { resolveConfig } from "./lib/config";
 import { createGoogleProvider } from "./providers/google";
 import { runGenerate } from "./commands/generate";
-import type { Provider } from "./providers/types";
+import type { ProviderConfig, ProviderFactory } from "./providers/types";
 
-const PROVIDERS: Record<string, (apiKey: string, baseUrl: string) => Provider> = {
+const PROVIDERS: Record<string, ProviderFactory> = {
   google: createGoogleProvider,
 };
 
@@ -32,7 +32,18 @@ async function main() {
     console.error(`Unknown provider: ${config.provider}. Available: ${Object.keys(PROVIDERS).join(", ")}`);
     process.exit(1);
   }
-  const provider = providerFactory(config.apiKey, config.baseUrl);
+  const providerConfig: ProviderConfig = {
+    apiKey: config.apiKey,
+    baseUrl: config.baseUrl,
+    model: config.model,
+  };
+  const provider = providerFactory(providerConfig);
+
+  // Defensive fallback: if config.model is empty (no CLI/env/default), use provider.defaultModel.
+  // In normal flow mergeConfig fills this, but providers may declare richer defaults.
+  if (!config.model) {
+    config.model = provider.defaultModel;
+  }
 
   switch (args.command) {
     case "generate":

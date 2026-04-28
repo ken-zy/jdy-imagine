@@ -9,14 +9,14 @@ import type {
   BatchJob,
   BatchResult,
   Provider,
+  ProviderConfig,
   ChainAnchor,
 } from "./types";
 
-export function mapQualityToImageSize(
-  quality: "normal" | "2k",
-): "1K" | "2K" {
-  return quality === "normal" ? "1K" : "2K";
-}
+// Re-export for backward compatibility — the canonical location is types.ts.
+// generate.ts and batch.ts can import from either path; existing tests that
+// import from "./google" continue to work.
+export { mapQualityToImageSize } from "./types";
 
 export function buildRealtimeRequestBody(req: GenerateRequest): {
   contents: Array<{
@@ -71,11 +71,10 @@ export function parseGenerateResponse(apiResponse: {
   }>;
 }): GenerateResult {
   const candidate = apiResponse.candidates?.[0];
-  const finishReason = (candidate?.finishReason ?? "OTHER") as
-    | "STOP"
-    | "SAFETY"
-    | "MAX_TOKENS"
-    | "OTHER";
+  const rawReason = candidate?.finishReason ?? "OTHER";
+  // Map Gemini's MAX_TOKENS to OTHER (image generation has no token-based stop)
+  const finishReason: GenerateResult["finishReason"] =
+    rawReason === "STOP" || rawReason === "SAFETY" ? rawReason : "OTHER";
 
   const result: GenerateResult = {
     images: [],
@@ -389,14 +388,35 @@ function googleHeaders(apiKey: string): Record<string, string> {
   return { "x-goog-api-key": apiKey };
 }
 
+// Google has no /edits endpoint — editTarget falls back to refs[0].
+function applyEditTargetFallback(req: GenerateRequest): GenerateRequest {
+  if (!req.editTarget) return req;
+  return { ...req, refs: [req.editTarget, ...req.refs] };
+}
+
+// Google's image generation has no equivalent to OpenAI's mask. Rather than
+// silently drop, throw so the user knows their request can't be satisfied.
+function rejectMask(req: GenerateRequest): void {
+  if (req.mask) {
+    throw new Error("Google provider does not support --mask. Mask is OpenAI-only.");
+  }
+}
+
+export function createGoogleProvider(config: ProviderConfig): Provider;
+// Legacy two-arg signature kept for callers/tests that haven't migrated yet.
+export function createGoogleProvider(apiKey: string, baseUrl: string): Provider;
 export function createGoogleProvider(
-  apiKey: string,
-  baseUrl: string,
+  configOrApiKey: ProviderConfig | string,
+  legacyBaseUrl?: string,
 ): Provider {
+  const apiKey = typeof configOrApiKey === "string" ? configOrApiKey : configOrApiKey.apiKey;
+  const baseUrl = typeof configOrApiKey === "string" ? legacyBaseUrl! : configOrApiKey.baseUrl;
   const headers = googleHeaders(apiKey);
   async function generateCore(
-    req: GenerateRequest,
+    rawReq: GenerateRequest,
   ): Promise<{ result: GenerateResult; rawResponse: unknown }> {
+    rejectMask(rawReq);
+    const req = applyEditTargetFallback(rawReq);
     const url = `${baseUrl}/v1beta/models/${req.model}:generateContent`;
     const body = buildRealtimeRequestBody(req);
 
@@ -442,7 +462,9 @@ export function createGoogleProvider(
     },
 
     // Chain: subsequent tasks — generate using anchor
-    async generateChained(req: GenerateRequest, anchor: ChainAnchor) {
+    async generateChained(rawReq: GenerateRequest, anchor: ChainAnchor) {
+      rejectMask(rawReq);
+      const req = applyEditTargetFallback(rawReq);
       const googleAnchor = anchor as GoogleChainAnchor;
       const url = `${baseUrl}/v1beta/models/${req.model}:generateContent`;
       const body = buildChainedRequestBody(req, googleAnchor);
@@ -462,10 +484,13 @@ export function createGoogleProvider(
     },
 
     async batchCreate(req: BatchCreateRequest): Promise<BatchJob> {
-      validateBatchTasks(req.tasks);
+      // Per-task: reject mask, apply editTarget fallback to refs[0]
+      for (const t of req.tasks) rejectMask(t);
+      const effectiveTasks = req.tasks.map(applyEditTargetFallback);
+      validateBatchTasks(effectiveTasks);
 
       const displayName = req.displayName ?? `jdy-imagine-${Date.now()}`;
-      const { data } = buildBatchJsonl(req.model, req.tasks, displayName);
+      const { data } = buildBatchJsonl(req.model, effectiveTasks, displayName);
 
       // Soft warning for large payloads (file input supports up to 2GB)
       const payloadMB = data.byteLength / (1024 * 1024);
