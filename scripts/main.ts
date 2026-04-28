@@ -54,6 +54,8 @@ async function main() {
         prompt: args.flags.prompt,
         prompts: args.flags.prompts,
         ref: args.flags.ref,
+        edit: args.flags.edit,
+        mask: args.flags.mask,
         outdir: args.flags.outdir,
         json: args.flags.json,
         character: args.flags.character,

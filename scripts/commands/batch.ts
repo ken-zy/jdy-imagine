@@ -22,6 +22,27 @@ export interface BatchManifest {
   }>;
 }
 
+/**
+ * Validate that batch tasks are compatible with the chosen provider.
+ *
+ * Currently the only restriction is OpenAI server-side batch being text-only:
+ * it cannot accept image inputs (refs / editTarget / mask). character profile
+ * injects refs into every task, so it triggers this restriction too.
+ */
+export function validateBatchTasks(providerName: string, tasks: GenerateRequest[]): void {
+  if (providerName !== "openai") return;
+  const offending = tasks.filter(t =>
+    t.refs.length > 0 || t.editTarget || t.mask
+  );
+  if (offending.length > 0) {
+    throw new Error(
+      `OpenAI server-side batch is text-only. ${offending.length} task(s) have image inputs ` +
+      `(refs / editTarget / mask). Note: --character profile injects refs into all tasks, which also ` +
+      `triggers this restriction. Either remove image inputs or use realtime mode.`,
+    );
+  }
+}
+
 export function saveManifest(outdir: string, manifest: BatchManifest): void {
   const dir = join(outdir, ".jdy-imagine-batch");
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
@@ -130,6 +151,9 @@ async function batchSubmit(
       imageSize: mapQualityToImageSize(t.quality ?? config.quality),
     };
   });
+
+  // Provider-specific compatibility check (e.g., OpenAI batch is text-only)
+  validateBatchTasks(provider.name, tasks);
 
   // Payload estimation guardrail (total: character refs + task refs + prompts per task)
   {
@@ -283,6 +307,8 @@ export function writeResults(
     if (!r.result || r.result.images.length === 0) {
       const msg = r.result?.finishReason === "SAFETY"
         ? `Safety block: ${r.result.safetyInfo?.reason ?? "unknown"}`
+        : r.result?.finishReason === "ERROR"
+        ? `Error: ${r.result.safetyInfo?.reason ?? "unknown"}`
         : "No image generated";
       if (jsonOutput) {
         console.log(JSON.stringify({ key: r.key, error: msg }));
