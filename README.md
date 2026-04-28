@@ -210,7 +210,7 @@ bun scripts/main.ts batch cancel <jobId>
 | `--json` | | JSON output mode | `false` |
 | `--async` | | Async batch submission | `false` |
 
-Aspect ratio options: `1:1`, `16:9`, `9:16`, `4:3`, `3:4`, `3:2`, `2:3`
+Aspect ratio options (CLI accepts 13 values): `1:1`, `16:9`, `9:16`, `4:3`, `3:4`, `3:2`, `2:3` (google + openai), plus `5:4`, `4:5`, `2:1`, `1:2`, `21:9`, `9:21` (apimart-only — google + openai reject these via `validateRequest`).
 
 ## Supported Models
 
