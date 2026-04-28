@@ -258,3 +258,127 @@ describe("chain orchestration with fake provider", () => {
     expect(exitCode).toBe(1);
   });
 });
+
+describe("integration: OpenAI provider", () => {
+  test("generate text-to-image end-to-end (mocked)", async () => {
+    const tmpOut = mkdtempSync(join(tmpdir(), "jdy-int-openai-"));
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: any) => {
+      if (url.toString().includes("/v1/images/generations")) {
+        return new Response(JSON.stringify({
+          data: [{ b64_json: Buffer.from("FAKE-PNG").toString("base64") }],
+        }), { status: 200 });
+      }
+      return new Response("nf", { status: 404 });
+    }) as typeof fetch;
+    try {
+      const { runGenerate } = await import("./commands/generate");
+      const { createOpenAIProvider } = await import("./providers/openai");
+      const provider = createOpenAIProvider({
+        apiKey: "k", baseUrl: "https://api.openai.com", model: "gpt-image-2",
+      });
+      await runGenerate(provider, {
+        provider: "openai", model: "gpt-image-2", quality: "normal", ar: "1:1",
+        apiKey: "k", baseUrl: "https://api.openai.com",
+      }, {
+        prompt: "test cat", outdir: tmpOut, json: false,
+      });
+      const files = (await Bun.$`ls ${tmpOut}/`.text()).trim().split("\n").filter(f => f.endsWith(".png"));
+      expect(files.length).toBe(1);
+    } finally {
+      globalThis.fetch = originalFetch;
+      rmSync(tmpOut, { recursive: true, force: true });
+    }
+  });
+
+  test("edit with mask end-to-end (mocked)", async () => {
+    const tmpOut = mkdtempSync(join(tmpdir(), "jdy-int-openai-edit-"));
+    const editFile = join(tmpOut, "edit.png");
+    const maskFile = join(tmpOut, "mask.png");
+    await Bun.write(editFile, new Uint8Array([0x89, 0x50, 0x4E, 0x47]));
+    await Bun.write(maskFile, new Uint8Array([0x89, 0x50, 0x4E, 0x47]));
+    const originalFetch = globalThis.fetch;
+    let capturedUrl = "";
+    globalThis.fetch = (async (url: any) => {
+      capturedUrl = url.toString();
+      return new Response(JSON.stringify({
+        data: [{ b64_json: Buffer.from("PNG").toString("base64") }],
+      }), { status: 200 });
+    }) as typeof fetch;
+    try {
+      const { runGenerate } = await import("./commands/generate");
+      const { createOpenAIProvider } = await import("./providers/openai");
+      const provider = createOpenAIProvider({
+        apiKey: "k", baseUrl: "https://api.openai.com", model: "gpt-image-2",
+      });
+      await runGenerate(provider, {
+        provider: "openai", model: "gpt-image-2", quality: "normal", ar: "1:1",
+        apiKey: "k", baseUrl: "https://api.openai.com",
+      }, {
+        prompt: "edit", edit: editFile, mask: maskFile, outdir: tmpOut, json: false,
+      });
+      expect(capturedUrl).toContain("/v1/images/edits");
+    } finally {
+      globalThis.fetch = originalFetch;
+      rmSync(tmpOut, { recursive: true, force: true });
+    }
+  });
+
+  test("batch submit/poll/fetch end-to-end (mocked)", async () => {
+    const tmpOut = mkdtempSync(join(tmpdir(), "jdy-int-openai-batch-"));
+    const promptsFile = join(tmpOut, "prompts.json");
+    writeFileSync(promptsFile, JSON.stringify([
+      { prompt: "cat" },
+      { prompt: "dog" },
+    ]));
+    const jsonlOutput =
+      JSON.stringify({ custom_id: "001-cat", response: { body: { data: [{ b64_json: Buffer.from("CAT").toString("base64") }] } } }) + "\n" +
+      JSON.stringify({ custom_id: "002-dog", response: { body: { data: [{ b64_json: Buffer.from("DOG").toString("base64") }] } } }) + "\n";
+    let pollCount = 0;
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: any, init: any = {}) => {
+      const u = url.toString();
+      const method = init.method ?? "GET";
+      if (u.endsWith("/v1/files") && method === "POST") {
+        return new Response(JSON.stringify({ id: "file_in" }), { status: 200 });
+      }
+      if (u.endsWith("/v1/batches") && method === "POST") {
+        return new Response(JSON.stringify({
+          id: "batch_int", status: "validating", created_at: 1000,
+        }), { status: 200 });
+      }
+      if (u.includes("/v1/batches/batch_int") && !u.includes("/cancel") && method === "GET") {
+        pollCount++;
+        const status = pollCount >= 2 ? "completed" : "in_progress";
+        return new Response(JSON.stringify({
+          id: "batch_int", status, created_at: 1000,
+          output_file_id: "file_out",
+          request_counts: { total: 2, completed: 2, failed: 0 },
+        }), { status: 200 });
+      }
+      if (u.includes("/v1/files/file_out/content")) {
+        return new Response(jsonlOutput, { status: 200 });
+      }
+      return new Response("nf", { status: 404 });
+    }) as typeof fetch;
+    try {
+      const { runBatch } = await import("./commands/batch");
+      const { createOpenAIProvider } = await import("./providers/openai");
+      const provider = createOpenAIProvider({
+        apiKey: "k", baseUrl: "https://api.openai.com", model: "gpt-image-2",
+      });
+      await runBatch(provider, {
+        provider: "openai", model: "gpt-image-2", quality: "normal", ar: "1:1",
+        apiKey: "k", baseUrl: "https://api.openai.com",
+      }, {
+        command: "batch", subcommand: "submit", positional: promptsFile,
+        flags: { outdir: tmpOut, json: false, async: false, chain: false },
+      } as any);
+      const files = (await Bun.$`ls ${tmpOut}/`.text()).trim().split("\n").filter(f => f.endsWith(".png"));
+      expect(files.length).toBe(2);
+    } finally {
+      globalThis.fetch = originalFetch;
+      rmSync(tmpOut, { recursive: true, force: true });
+    }
+  }, 60_000);
+});
