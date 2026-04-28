@@ -4,6 +4,11 @@ import { join } from "path";
 export interface Config {
   provider: string;
   model: string;
+  /** Resolution tier — replaces the dimensional half of legacy `quality`. */
+  resolution: "1k" | "2k" | "4k";
+  /** Detail tier — replaces the OpenAI-mapped half of legacy `quality`. */
+  detail: "auto" | "low" | "medium" | "high";
+  /** @deprecated derived from `resolution`; removed in Task 1.7 cleanup */
   quality: "normal" | "2k";
   ar: string;
   apiKey: string;
@@ -12,7 +17,8 @@ export interface Config {
 
 const DEFAULTS = {
   provider: "google",
-  quality: "2k" as const,
+  resolution: "2k" as const,
+  detail: "high" as const,
   ar: "1:1",
 };
 
@@ -25,7 +31,20 @@ const PROVIDER_DEFAULTS: Record<string, { baseUrl: string; defaultModel: string 
     baseUrl: "https://api.openai.com",
     defaultModel: "gpt-image-2",
   },
+  apimart: {
+    baseUrl: "https://api.apimart.ai",
+    defaultModel: "gpt-image-2-official",
+  },
 };
+
+export const QUALITY_REMOVED_MSG =
+  "--quality / default_quality / prompts.json 'quality' field has been removed.\n" +
+  "Migration:\n" +
+  "  --quality normal → --resolution 1k --detail medium\n" +
+  "  --quality 2k     → --resolution 2k --detail high\n" +
+  "EXTEND.md default_quality:\n" +
+  "  default_quality: normal → default_resolution: 1k + default_detail: medium\n" +
+  "  default_quality: 2k     → default_resolution: 2k + default_detail: high";
 
 export function parseExtendMd(
   content: string,
@@ -82,7 +101,23 @@ export function mergeConfig(
     apiKey = env.OPENAI_API_KEY ?? "";
     baseUrl = env.OPENAI_BASE_URL ?? baseUrl;
     envModel = env.OPENAI_IMAGE_MODEL;
+  } else if (provider === "apimart") {
+    apiKey = env.APIMART_API_KEY ?? "";
+    baseUrl = env.APIMART_BASE_URL ?? baseUrl;
+    envModel = env.APIMART_IMAGE_MODEL;
   }
+
+  const resolution = (cliFlags.resolution ??
+    extendMd.default_resolution ??
+    DEFAULTS.resolution) as "1k" | "2k" | "4k";
+  const detail = (cliFlags.detail ??
+    extendMd.default_detail ??
+    DEFAULTS.detail) as "auto" | "low" | "medium" | "high";
+  // Legacy quality derived from resolution (removed in Task 1.7).
+  const derivedQuality: "normal" | "2k" = resolution === "1k" ? "normal" : "2k";
+  const quality = (cliFlags.quality ??
+    extendMd.default_quality ??
+    derivedQuality) as "normal" | "2k";
 
   return {
     provider,
@@ -91,9 +126,9 @@ export function mergeConfig(
       extendMd.default_model ??
       envModel ??
       providerDefault.defaultModel,
-    quality: (cliFlags.quality ??
-      extendMd.default_quality ??
-      DEFAULTS.quality) as "normal" | "2k",
+    resolution,
+    detail,
+    quality,
     ar:
       cliFlags.ar ??
       extendMd.default_ar ??

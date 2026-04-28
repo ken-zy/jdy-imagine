@@ -86,6 +86,83 @@ describe("mergeConfig", () => {
   });
 });
 
+describe("mergeConfig resolution/detail (Task 1.3 additive)", () => {
+  test("default resolution=2k, detail=high", () => {
+    const c = mergeConfig({}, {}, {});
+    expect(c.resolution).toBe("2k");
+    expect(c.detail).toBe("high");
+  });
+
+  test("CLI flags override defaults", () => {
+    const c = mergeConfig({ resolution: "4k", detail: "low" }, {}, {});
+    expect(c.resolution).toBe("4k");
+    expect(c.detail).toBe("low");
+  });
+
+  test("EXTEND.md default_resolution / default_detail parse", () => {
+    const c = mergeConfig({}, { default_resolution: "1k", default_detail: "medium" }, {});
+    expect(c.resolution).toBe("1k");
+    expect(c.detail).toBe("medium");
+  });
+
+  test("legacy quality field is derived from resolution (1k → normal, 2k/4k → 2k)", () => {
+    const c1 = mergeConfig({ resolution: "1k" }, {}, {});
+    expect(c1.quality).toBe("normal");
+    const c2 = mergeConfig({ resolution: "2k" }, {}, {});
+    expect(c2.quality).toBe("2k");
+    const c4 = mergeConfig({ resolution: "4k" }, {}, {});
+    expect(c4.quality).toBe("2k");
+  });
+});
+
+describe("mergeConfig apimart provider", () => {
+  test("provider=apimart picks APIMART_* env", () => {
+    const c = mergeConfig(
+      { provider: "apimart" },
+      {},
+      {
+        APIMART_API_KEY: "sk-am",
+        APIMART_BASE_URL: "https://api.apimart.ai",
+        APIMART_IMAGE_MODEL: "gpt-image-2-official",
+      },
+    );
+    expect(c.provider).toBe("apimart");
+    expect(c.apiKey).toBe("sk-am");
+    expect(c.baseUrl).toBe("https://api.apimart.ai");
+    expect(c.model).toBe("gpt-image-2-official");
+  });
+
+  test("apimart default baseUrl + defaultModel", () => {
+    const c = mergeConfig(
+      { provider: "apimart" },
+      {},
+      { APIMART_API_KEY: "k" },
+    );
+    expect(c.baseUrl).toBe("https://api.apimart.ai");
+    expect(c.model).toBe("gpt-image-2-official");
+  });
+
+  test("default_model in EXTEND.md leaks across providers (documented behavior)", () => {
+    // Reproduces the P1-1 risk: if user sets default_model: gemini-..., switching --provider
+    // doesn't auto-reset it. Test asserts the priority order is intentional and points users
+    // to --model override or per-provider env.
+    const c = mergeConfig(
+      { provider: "apimart" },
+      { default_model: "gemini-3.1-flash-image-preview" },
+      { APIMART_API_KEY: "k", APIMART_IMAGE_MODEL: "gpt-image-2-official" },
+    );
+    // Documented priority: cliFlags.model > extendMd.default_model > envModel > providerDefault
+    expect(c.model).toBe("gemini-3.1-flash-image-preview");
+    // Escape hatch: explicit --model wins.
+    const c2 = mergeConfig(
+      { provider: "apimart", model: "gpt-image-2-official" },
+      { default_model: "gemini-3.1-flash-image-preview" },
+      { APIMART_API_KEY: "k" },
+    );
+    expect(c2.model).toBe("gpt-image-2-official");
+  });
+});
+
 describe("mergeConfig with openai provider", () => {
   test("reads OPENAI_API_KEY when provider=openai", () => {
     const c = mergeConfig(
