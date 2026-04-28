@@ -10,6 +10,8 @@ export interface ParsedArgs {
     ar?: string;
     quality?: string;
     ref?: string[];
+    edit?: string;
+    mask?: string;
     outdir: string;
     json: boolean;
     async: boolean;
@@ -83,6 +85,12 @@ export function parseArgs(argv: string[]): ParsedArgs {
       case "--ref":
         if (!result.flags.ref) result.flags.ref = [];
         result.flags.ref.push(nextVal(arg));
+        break;
+      case "--edit":
+        result.flags.edit = nextVal(arg);
+        break;
+      case "--mask":
+        result.flags.mask = nextVal(arg);
         break;
       case "--outdir":
       case "-o":

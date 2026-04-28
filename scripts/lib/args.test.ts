@@ -114,3 +114,17 @@ describe("--character flag", () => {
     expect(result.flags.character).toBe("char.json");
   });
 });
+
+describe("parseArgs --edit / --mask", () => {
+  test("parses --edit", () => {
+    const args = parseArgs(["generate", "--prompt", "x", "--edit", "/tmp/e.png"]);
+    expect(args.flags.edit).toBe("/tmp/e.png");
+  });
+  test("parses --mask", () => {
+    const args = parseArgs([
+      "generate", "--prompt", "x", "--edit", "/tmp/e.png", "--mask", "/tmp/m.png",
+    ]);
+    expect(args.flags.mask).toBe("/tmp/m.png");
+    expect(args.flags.edit).toBe("/tmp/e.png");
+  });
+});
