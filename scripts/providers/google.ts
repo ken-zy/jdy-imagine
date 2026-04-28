@@ -385,10 +385,15 @@ export function parseJsonlResultLine(line: string): BatchResult | null {
 const RETRY_DELAYS = [1000, 2000, 4000];
 const RETRYABLE_STATUS = new Set([429, 500, 503]);
 
+function googleHeaders(apiKey: string): Record<string, string> {
+  return { "x-goog-api-key": apiKey };
+}
+
 export function createGoogleProvider(
   apiKey: string,
   baseUrl: string,
 ): Provider {
+  const headers = googleHeaders(apiKey);
   async function generateCore(
     req: GenerateRequest,
   ): Promise<{ result: GenerateResult; rawResponse: unknown }> {
@@ -396,7 +401,7 @@ export function createGoogleProvider(
     const body = buildRealtimeRequestBody(req);
 
     for (let attempt = 0; attempt <= RETRY_DELAYS.length; attempt++) {
-      const res = await httpPost(url, body, apiKey);
+      const res = await httpPost(url, body, headers);
 
       if (res.status === 200) {
         return {
@@ -443,7 +448,7 @@ export function createGoogleProvider(
       const body = buildChainedRequestBody(req, googleAnchor);
 
       for (let attempt = 0; attempt <= RETRY_DELAYS.length; attempt++) {
-        const res = await httpPost(url, body, apiKey);
+        const res = await httpPost(url, body, headers);
         if (res.status === 200) {
           return parseGenerateResponse(res.data as Parameters<typeof parseGenerateResponse>[0]);
         }
@@ -479,7 +484,7 @@ export function createGoogleProvider(
           input_config: { file_name: fileName },
         },
       };
-      const res = await httpPostWithRetry(url, body, apiKey);
+      const res = await httpPostWithRetry(url, body, headers);
 
       if (res.status !== 200) {
         const errData = res.data as { error?: { message?: string } };
@@ -499,7 +504,7 @@ export function createGoogleProvider(
 
     async batchGet(jobId: string): Promise<BatchJob> {
       const url = `${baseUrl}/v1beta/${jobId}`;
-      const res = await httpGetWithRetry(url, apiKey);
+      const res = await httpGetWithRetry(url, headers);
 
       if (res.status !== 200) {
         const errData = res.data as { error?: { message?: string } };
@@ -538,7 +543,7 @@ export function createGoogleProvider(
     async batchFetch(jobId: string): Promise<BatchResult[]> {
       // Step 1: get full batch job response
       const url = `${baseUrl}/v1beta/${jobId}`;
-      const res = await httpGetWithRetry(url, apiKey);
+      const res = await httpGetWithRetry(url, headers);
 
       if (res.status !== 200) {
         const errData = res.data as { error?: { message?: string } };
@@ -587,7 +592,7 @@ export function createGoogleProvider(
 
     async batchList(): Promise<BatchJob[]> {
       const url = `${baseUrl}/v1beta/batches`;
-      const res = await httpGetWithRetry(url, apiKey);
+      const res = await httpGetWithRetry(url, headers);
 
       if (res.status !== 200) {
         const errData = res.data as { error?: { message?: string } };
@@ -609,7 +614,7 @@ export function createGoogleProvider(
 
     async batchCancel(jobId: string): Promise<void> {
       const url = `${baseUrl}/v1beta/${jobId}:cancel`;
-      const res = await httpPostWithRetry(url, {}, apiKey);
+      const res = await httpPostWithRetry(url, {}, headers);
 
       if (res.status !== 200) {
         const errData = res.data as { error?: { message?: string } };
