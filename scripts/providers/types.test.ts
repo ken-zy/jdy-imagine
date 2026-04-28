@@ -161,3 +161,72 @@ describe("BatchJob type", () => {
     expect(job.responsesFile).toBeUndefined();
   });
 });
+
+describe("GenerateRequest additive — resolution/detail coexist with quality/imageSize", () => {
+  test("accepts resolution + detail alongside quality + imageSize", () => {
+    const req: GenerateRequest = {
+      prompt: "a cat",
+      model: "gpt-image-2",
+      ar: "16:9",
+      quality: "2k",
+      imageSize: "2K",
+      resolution: "2k",
+      detail: "high",
+      refs: [],
+    };
+    expect(req.resolution).toBe("2k");
+    expect(req.detail).toBe("high");
+    expect(req.quality).toBe("2k");
+  });
+
+  test("resolution accepts 1k/2k/4k", () => {
+    const reqs: GenerateRequest[] = (["1k", "2k", "4k"] as const).map((r) => ({
+      prompt: "x",
+      model: "m",
+      ar: null,
+      quality: "2k",
+      imageSize: "2K",
+      resolution: r,
+      detail: "auto",
+      refs: [],
+    }));
+    expect(reqs.map((r) => r.resolution)).toEqual(["1k", "2k", "4k"]);
+  });
+
+  test("detail accepts auto/low/medium/high", () => {
+    const reqs: GenerateRequest[] = (["auto", "low", "medium", "high"] as const).map((d) => ({
+      prompt: "x",
+      model: "m",
+      ar: null,
+      quality: "normal",
+      imageSize: "1K",
+      resolution: "1k",
+      detail: d,
+      refs: [],
+    }));
+    expect(reqs.map((r) => r.detail)).toEqual(["auto", "low", "medium", "high"]);
+  });
+});
+
+describe("Provider interface — validateRequest hook", () => {
+  test("optional validateRequest is acceptable on Provider", () => {
+    const p: Provider = {
+      name: "test",
+      defaultModel: "x",
+      generate: async () => ({ images: [], finishReason: "STOP" }),
+      validateRequest: (req) => {
+        void req;
+      },
+    };
+    expect(p.validateRequest).toBeDefined();
+  });
+
+  test("provider without validateRequest still satisfies Provider type", () => {
+    const p: Provider = {
+      name: "test",
+      defaultModel: "x",
+      generate: async () => ({ images: [], finishReason: "STOP" }),
+    };
+    expect(p.validateRequest).toBeUndefined();
+  });
+});

@@ -2,9 +2,15 @@ export interface GenerateRequest {
   prompt: string;
   model: string;
   ar: string | null;
+  /** @deprecated kept until Task 1.7 cleanup; new code reads `resolution` */
   quality: "normal" | "2k";
-  refs: string[];                 // 参考图（风格/构图样板）
+  /** @deprecated kept until Task 1.7 cleanup; google derives uppercase from `resolution` */
   imageSize: "1K" | "2K" | "4K";
+  /** Resolution tier — replaces `quality` for the dimension dimension. */
+  resolution: "1k" | "2k" | "4k";
+  /** Detail tier — replaces the OpenAI-specific quality/sharpness mapping. */
+  detail: "auto" | "low" | "medium" | "high";
+  refs: string[];                 // 参考图（风格/构图样板）
   editTarget?: string;            // OpenAI: route to /v1/images/edits; Google: fallback to refs[0]
   mask?: string;                  // OpenAI edit only; Google: provider throws
 }
@@ -64,6 +70,12 @@ export type ProviderFactory = (config: ProviderConfig) => Provider;
 export interface Provider {
   name: string;
   defaultModel: string;
+
+  /** Optional fail-fast hook called by command layer for every final GenerateRequest before any
+   * provider.generate / batchCreate runs. Provider throws if the request violates its capabilities
+   * (e.g. apimart 4K requires specific ar; google does not support 4K). Skipping this hook is OK;
+   * generate() still does its own runtime validation. */
+  validateRequest?(req: GenerateRequest): void;
 
   // Realtime
   generate(req: GenerateRequest): Promise<GenerateResult>;
