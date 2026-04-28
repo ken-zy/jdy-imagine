@@ -1,11 +1,13 @@
 import { parseArgs } from "./lib/args";
 import { resolveConfig } from "./lib/config";
 import { createGoogleProvider } from "./providers/google";
+import { createOpenAIProvider } from "./providers/openai";
 import { runGenerate } from "./commands/generate";
 import type { ProviderConfig, ProviderFactory } from "./providers/types";
 
 const PROVIDERS: Record<string, ProviderFactory> = {
   google: createGoogleProvider,
+  openai: createOpenAIProvider,
 };
 
 async function main() {
