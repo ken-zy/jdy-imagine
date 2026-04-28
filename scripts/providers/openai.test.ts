@@ -1,7 +1,6 @@
 import { describe, test, expect, mock, afterEach } from "bun:test";
 import {
   mapToOpenAISize,
-  mapToOpenAIQuality,
   mapOpenAIBatchState,
   mapOpenAIError,
   buildGenerationsPayload,
@@ -11,15 +10,15 @@ import {
   createOpenAIProvider,
 } from "./openai";
 
-describe("mapToOpenAISize", () => {
-  const cases: Array<["normal" | "2k", string, string]> = [
-    ["normal", "1:1", "1024x1024"],
-    ["normal", "16:9", "1536x864"],   // true 16:9, not 3:2
-    ["normal", "9:16", "864x1536"],
-    ["normal", "3:2", "1536x1024"],
-    ["normal", "2:3", "1024x1536"],
-    ["normal", "4:3", "1280x960"],
-    ["normal", "3:4", "960x1280"],
+describe("mapToOpenAISize (resolution-indexed)", () => {
+  const cases: Array<["1k" | "2k", string, string]> = [
+    ["1k", "1:1", "1024x1024"],
+    ["1k", "16:9", "1536x864"],   // true 16:9, not 3:2
+    ["1k", "9:16", "864x1536"],
+    ["1k", "3:2", "1536x1024"],
+    ["1k", "2:3", "1024x1536"],
+    ["1k", "4:3", "1280x960"],
+    ["1k", "3:4", "960x1280"],
     ["2k", "1:1", "2048x2048"],
     ["2k", "16:9", "2048x1152"],
     ["2k", "9:16", "1152x2048"],
@@ -28,22 +27,35 @@ describe("mapToOpenAISize", () => {
     ["2k", "4:3", "2048x1536"],
     ["2k", "3:4", "1536x2048"],
   ];
-  for (const [q, ar, size] of cases) {
-    test(`${q} + ${ar} -> ${size}`, () => {
-      expect(mapToOpenAISize(q, ar)).toBe(size);
+  for (const [r, ar, size] of cases) {
+    test(`${r} + ${ar} -> ${size}`, () => {
+      expect(mapToOpenAISize(r, ar)).toBe(size);
     });
   }
   test("null ar defaults to 1:1", () => {
-    expect(mapToOpenAISize("normal", null)).toBe("1024x1024");
+    expect(mapToOpenAISize("1k", null)).toBe("1024x1024");
   });
   test("unknown ar throws", () => {
-    expect(() => mapToOpenAISize("normal", "100:1")).toThrow(/unsupported.*ar/i);
+    expect(() => mapToOpenAISize("1k", "100:1")).toThrow(/unsupported.*ar/i);
+  });
+  test("resolution=4k throws", () => {
+    expect(() => mapToOpenAISize("4k", "16:9")).toThrow(/4k/);
   });
 });
 
-describe("mapToOpenAIQuality", () => {
-  test("normal -> medium", () => expect(mapToOpenAIQuality("normal")).toBe("medium"));
-  test("2k -> high", () => expect(mapToOpenAIQuality("2k")).toBe("high"));
+describe("openai detail passthrough", () => {
+  test.each([["auto"], ["low"], ["medium"], ["high"]] as const)(
+    "buildGenerationsPayload detail=%s passes through to quality field",
+    ([detail]) => {
+      const payload = buildGenerationsPayload({
+        prompt: "x", model: "gpt-image-2", ar: "1:1",
+        quality: "2k", imageSize: "2K",
+        resolution: "2k", detail,
+        refs: [],
+      });
+      expect(payload.quality).toBe(detail);
+    },
+  );
 });
 
 describe("mapOpenAIBatchState", () => {
@@ -485,4 +497,42 @@ describe("createOpenAIProvider proxy guard", () => {
   // inspection: the guard is only invoked inside the editTarget/refs/mask branch
   // and inside batchCreate. The text-only generations branch in generateOnce
   // does not reference it.
+});
+
+describe("openai validateRequest hook (Task 1.5)", () => {
+  const provider = createOpenAIProvider({
+    apiKey: "k",
+    baseUrl: "https://api.openai.com",
+    model: "gpt-image-2",
+  });
+
+  test("rejects resolution=4k", () => {
+    expect(() => provider.validateRequest!({
+      prompt: "x", model: "gpt-image-2", ar: "16:9",
+      quality: "2k", imageSize: "2K",
+      resolution: "4k", detail: "high",
+      refs: [],
+    })).toThrow(/4k/);
+  });
+
+  test("rejects unsupported ar 5:4", () => {
+    expect(() => provider.validateRequest!({
+      prompt: "x", model: "gpt-image-2", ar: "5:4",
+      quality: "2k", imageSize: "2K",
+      resolution: "2k", detail: "high",
+      refs: [],
+    })).toThrow(/5:4/);
+  });
+
+  test.each(["1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3"])(
+    "accepts ar %s",
+    (ar) => {
+      expect(() => provider.validateRequest!({
+        prompt: "x", model: "gpt-image-2", ar,
+        quality: "2k", imageSize: "2K",
+        resolution: "2k", detail: "high",
+        refs: [],
+      })).not.toThrow();
+    },
+  );
 });
