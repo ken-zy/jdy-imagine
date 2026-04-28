@@ -2,13 +2,9 @@ export interface GenerateRequest {
   prompt: string;
   model: string;
   ar: string | null;
-  /** @deprecated kept until Task 1.7 cleanup; new code reads `resolution` */
-  quality: "normal" | "2k";
-  /** @deprecated kept until Task 1.7 cleanup; google derives uppercase from `resolution` */
-  imageSize: "1K" | "2K" | "4K";
-  /** Resolution tier — replaces `quality` for the dimension dimension. */
+  /** Resolution tier. Google derives uppercase imageSize internally. */
   resolution: "1k" | "2k" | "4k";
-  /** Detail tier — replaces the OpenAI-specific quality/sharpness mapping. */
+  /** Detail tier. OpenAI passes through to its quality field; Gemini ignores. */
   detail: "auto" | "low" | "medium" | "high";
   refs: string[];                 // 参考图（风格/构图样板）
   editTarget?: string;            // OpenAI: route to /v1/images/edits; Google: fallback to refs[0]
@@ -92,10 +88,3 @@ export interface Provider {
   batchCancel?(jobId: string): Promise<void>;
 }
 
-// Provider-agnostic enum mapping. Located in types.ts so consumers don't depend
-// on a specific provider implementation file.
-export function mapQualityToImageSize(
-  quality: "normal" | "2k",
-): "1K" | "2K" {
-  return quality === "normal" ? "1K" : "2K";
-}

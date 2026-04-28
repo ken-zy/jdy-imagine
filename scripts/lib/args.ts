@@ -8,11 +8,9 @@ export interface ParsedArgs {
     model?: string;
     provider?: string;
     ar?: string;
-    /** @deprecated Removed in Task 1.6 cleanup. Use resolution + detail. */
-    quality?: string;
-    /** Resolution tier. Replaces the dimensional half of legacy `--quality`. */
+    /** Resolution tier. */
     resolution?: string;
-    /** Detail tier. Replaces the OpenAI-mapped half of legacy `--quality`. */
+    /** Detail tier. */
     detail?: string;
     ref?: string[];
     edit?: string;

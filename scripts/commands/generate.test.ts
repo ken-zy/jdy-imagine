@@ -36,7 +36,7 @@ describe("loadPrompts", () => {
     const tasks = loadPrompts({ prompt: "A cat" }, {
       model: "test",
       ar: "1:1",
-      quality: "2k" as const,
+      resolution: "2k", detail: "high" as const,
       refs: [],
     });
     expect(tasks).toHaveLength(1);

@@ -135,24 +135,13 @@ function inferMimeType(path: string): string {
   return "image/png";
 }
 
-/** Transition fallback (removed in Task 1.7): if `resolution` / `detail` are unset on a
- * legacy fixture, derive from the old `quality` field. */
-function effectiveResolution(req: GenerateRequest): "1k" | "2k" | "4k" {
-  if (req.resolution) return req.resolution;
-  return req.quality === "normal" ? "1k" : "2k";
-}
-function effectiveDetail(req: GenerateRequest): "auto" | "low" | "medium" | "high" {
-  if (req.detail) return req.detail;
-  return req.quality === "normal" ? "medium" : "high";
-}
-
 export function buildGenerationsPayload(req: GenerateRequest): Record<string, unknown> {
   return {
     model: req.model,
     prompt: req.prompt,
     n: 1,
-    size: mapToOpenAISize(effectiveResolution(req), req.ar),
-    quality: effectiveDetail(req),
+    size: mapToOpenAISize(req.resolution, req.ar),
+    quality: req.detail,
     output_format: "png",
   };
 }
@@ -162,8 +151,8 @@ export function buildEditFormData(req: GenerateRequest): FormData {
   fd.append("model", req.model);
   fd.append("prompt", req.prompt);
   fd.append("n", "1");
-  fd.append("size", mapToOpenAISize(effectiveResolution(req), req.ar));
-  fd.append("quality", effectiveDetail(req));
+  fd.append("size", mapToOpenAISize(req.resolution, req.ar));
+  fd.append("quality", req.detail);
   fd.append("output_format", "png");
 
   // image[] order: editTarget first (if any), then refs (incl. character refs)

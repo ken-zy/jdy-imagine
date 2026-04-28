@@ -81,7 +81,8 @@ describe("mergeConfig", () => {
     const config = mergeConfig({}, {}, {});
     expect(config.model).toBe("gemini-3.1-flash-image-preview");
     expect(config.provider).toBe("google");
-    expect(config.quality).toBe("2k");
+    expect(config.resolution).toBe("2k");
+    expect(config.detail).toBe("high");
     expect(config.ar).toBe("1:1");
   });
 });
@@ -105,14 +106,6 @@ describe("mergeConfig resolution/detail (Task 1.3 additive)", () => {
     expect(c.detail).toBe("medium");
   });
 
-  test("legacy quality field is derived from resolution (1k → normal, 2k/4k → 2k)", () => {
-    const c1 = mergeConfig({ resolution: "1k" }, {}, {});
-    expect(c1.quality).toBe("normal");
-    const c2 = mergeConfig({ resolution: "2k" }, {}, {});
-    expect(c2.quality).toBe("2k");
-    const c4 = mergeConfig({ resolution: "4k" }, {}, {});
-    expect(c4.quality).toBe("2k");
-  });
 });
 
 describe("mergeConfig apimart provider", () => {

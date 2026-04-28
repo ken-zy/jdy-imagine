@@ -49,8 +49,7 @@ describe("openai detail passthrough", () => {
     ([detail]) => {
       const payload = buildGenerationsPayload({
         prompt: "x", model: "gpt-image-2", ar: "1:1",
-        quality: "2k", imageSize: "2K",
-        resolution: "2k", detail,
+        resolution: "2k", detail: "high", detail,
         refs: [],
       });
       expect(payload.quality).toBe(detail);
@@ -99,9 +98,8 @@ describe("buildGenerationsPayload", () => {
       prompt: "cat",
       model: "gpt-image-2",
       ar: "1:1",
-      quality: "normal",
+      resolution: "1k", detail: "medium",
       refs: [],
-      imageSize: "1K",
     });
     expect(payload.prompt).toBe("cat");
     expect(payload.model).toBe("gpt-image-2");
@@ -130,8 +128,8 @@ describe("parseOpenAIResponse", () => {
 describe("buildOpenAIBatchJsonl", () => {
   test("produces correct format with custom_id, method, url, body", () => {
     const { data, keys } = buildOpenAIBatchJsonl([
-      { prompt: "cat", model: "gpt-image-2", ar: "1:1", quality: "normal", refs: [], imageSize: "1K" },
-      { prompt: "dog", model: "gpt-image-2", ar: "16:9", quality: "2k", refs: [], imageSize: "2K" },
+      { prompt: "cat", model: "gpt-image-2", ar: "1:1", resolution: "1k", detail: "medium", refs: [] },
+      { prompt: "dog", model: "gpt-image-2", ar: "16:9", resolution: "2k", detail: "high", refs: [] },
     ]);
     const text = new TextDecoder().decode(data);
     const lines = text.trim().split("\n");
@@ -159,9 +157,8 @@ describe("buildEditFormData", () => {
       prompt: "x",
       model: "gpt-image-2",
       ar: "1:1",
-      quality: "normal",
+      resolution: "1k", detail: "medium",
       refs: [tmpRef],
-      imageSize: "1K",
       editTarget: tmpEdit,
     });
     const images = fd.getAll("image[]") as File[];
@@ -179,9 +176,8 @@ describe("buildEditFormData", () => {
       prompt: "x",
       model: "gpt-image-2",
       ar: "1:1",
-      quality: "normal",
+      resolution: "1k", detail: "medium",
       refs: [],
-      imageSize: "1K",
       editTarget: tmpEdit,
       mask: tmpMask,
     });
@@ -208,8 +204,8 @@ describe("createOpenAIProvider routing", () => {
     }) as any;
     const provider = createOpenAIProvider({ apiKey: "k", baseUrl: "https://api.openai.com", model: "gpt-image-2" });
     const result = await provider.generate({
-      prompt: "cat", model: "gpt-image-2", ar: "1:1", quality: "normal",
-      refs: [], imageSize: "1K",
+      prompt: "cat", model: "gpt-image-2", ar: "1:1", resolution: "1k", detail: "medium",
+      refs: [],
     });
     expect(capturedUrl).toContain("/v1/images/generations");
     expect(capturedMethod).toBe("POST");
@@ -232,8 +228,8 @@ describe("createOpenAIProvider routing", () => {
     }) as any;
     const provider = createOpenAIProvider({ apiKey: "k", baseUrl: "https://api.openai.com", model: "gpt-image-2" });
     await provider.generate({
-      prompt: "blue", model: "gpt-image-2", ar: "1:1", quality: "normal",
-      refs: [tmpRef], imageSize: "1K",
+      prompt: "blue", model: "gpt-image-2", ar: "1:1", resolution: "1k", detail: "medium",
+      refs: [tmpRef],
     });
     expect(capturedUrl).toContain("/v1/images/edits");
     expect(capturedBodyIsFormData).toBe(true);
@@ -253,8 +249,8 @@ describe("createOpenAIProvider routing", () => {
     }) as any;
     const provider = createOpenAIProvider({ apiKey: "k", baseUrl: "https://api.openai.com", model: "gpt-image-2" });
     await provider.generate({
-      prompt: "fix", model: "gpt-image-2", ar: "1:1", quality: "normal",
-      refs: [], imageSize: "1K", editTarget: tmpEdit, mask: tmpMask,
+      prompt: "fix", model: "gpt-image-2", ar: "1:1", resolution: "1k", detail: "medium",
+      refs: [], editTarget: tmpEdit, mask: tmpMask,
     });
     expect(capturedUrl).toContain("/v1/images/edits");
   });
@@ -265,8 +261,8 @@ describe("createOpenAIProvider routing", () => {
     ) as any;
     const provider = createOpenAIProvider({ apiKey: "k", baseUrl: "https://api.openai.com", model: "gpt-image-2" });
     const r = await provider.generate({
-      prompt: "x", model: "gpt-image-2", ar: "1:1", quality: "normal",
-      refs: [], imageSize: "1K",
+      prompt: "x", model: "gpt-image-2", ar: "1:1", resolution: "1k", detail: "medium",
+      refs: [],
     });
     expect(r.finishReason).toBe("SAFETY");
     expect(r.safetyInfo?.reason).toBe("no");
@@ -278,8 +274,8 @@ describe("createOpenAIProvider routing", () => {
     ) as any;
     const provider = createOpenAIProvider({ apiKey: "bad", baseUrl: "https://api.openai.com", model: "gpt-image-2" });
     await expect(provider.generate({
-      prompt: "x", model: "gpt-image-2", ar: "1:1", quality: "normal",
-      refs: [], imageSize: "1K",
+      prompt: "x", model: "gpt-image-2", ar: "1:1", resolution: "1k", detail: "medium",
+      refs: [],
     })).rejects.toThrow(/auth|401/i);
   });
 });
@@ -307,7 +303,7 @@ describe("createOpenAIProvider batch", () => {
     const job = await provider.batchCreate!({
       model: "gpt-image-2",
       tasks: [
-        { prompt: "cat", model: "gpt-image-2", ar: "1:1", quality: "normal", refs: [], imageSize: "1K" },
+        { prompt: "cat", model: "gpt-image-2", ar: "1:1", resolution: "1k", detail: "medium", refs: [] },
       ],
     });
     expect(job.id).toBe("batch_abc");
@@ -321,7 +317,7 @@ describe("createOpenAIProvider batch", () => {
     await expect(provider.batchCreate!({
       model: "gpt-image-2",
       tasks: [
-        { prompt: "x", model: "m", ar: null, quality: "normal", refs: ["/tmp/a.png"], imageSize: "1K" },
+        { prompt: "x", model: "m", ar: null, resolution: "1k", detail: "medium", refs: ["/tmp/a.png"] },
       ],
     })).rejects.toThrow(/text-only/i);
   });
@@ -331,7 +327,7 @@ describe("createOpenAIProvider batch", () => {
     await expect(provider.batchCreate!({
       model: "gpt-image-2",
       tasks: [
-        { prompt: "x", model: "m", ar: null, quality: "normal", refs: [], imageSize: "1K", editTarget: "/tmp/e.png" },
+        { prompt: "x", model: "m", ar: null, resolution: "1k", detail: "medium", refs: [], editTarget: "/tmp/e.png" },
       ],
     })).rejects.toThrow(/text-only/i);
   });
@@ -467,8 +463,8 @@ describe("createOpenAIProvider proxy guard", () => {
     try {
       const provider = createOpenAIProvider({ apiKey: "k", baseUrl: "https://api.openai.com", model: "gpt-image-2" });
       await expect(provider.generate({
-        prompt: "edit", model: "gpt-image-2", ar: "1:1", quality: "normal",
-        refs: [], imageSize: "1K", editTarget: tmpEdit,
+        prompt: "edit", model: "gpt-image-2", ar: "1:1", resolution: "1k", detail: "medium",
+        refs: [], editTarget: tmpEdit,
       })).rejects.toThrow(/multipart upload.*not supported through HTTP proxy/i);
     } finally {
       if (orig === undefined) delete process.env.HTTPS_PROXY;
@@ -484,7 +480,7 @@ describe("createOpenAIProvider proxy guard", () => {
       await expect(provider.batchCreate!({
         model: "gpt-image-2",
         tasks: [
-          { prompt: "x", model: "m", ar: null, quality: "normal", refs: [], imageSize: "1K" },
+          { prompt: "x", model: "m", ar: null, resolution: "1k", detail: "medium", refs: [] },
         ],
       })).rejects.toThrow(/multipart upload.*not supported through HTTP proxy/i);
     } finally {
@@ -509,8 +505,7 @@ describe("openai validateRequest hook (Task 1.5)", () => {
   test("rejects resolution=4k", () => {
     expect(() => provider.validateRequest!({
       prompt: "x", model: "gpt-image-2", ar: "16:9",
-      quality: "2k", imageSize: "2K",
-      resolution: "4k", detail: "high",
+      resolution: "4k", detail: "high", detail: "high",
       refs: [],
     })).toThrow(/4k/);
   });
@@ -518,8 +513,7 @@ describe("openai validateRequest hook (Task 1.5)", () => {
   test("rejects unsupported ar 5:4", () => {
     expect(() => provider.validateRequest!({
       prompt: "x", model: "gpt-image-2", ar: "5:4",
-      quality: "2k", imageSize: "2K",
-      resolution: "2k", detail: "high",
+      resolution: "2k", detail: "high", detail: "high",
       refs: [],
     })).toThrow(/5:4/);
   });
@@ -529,8 +523,7 @@ describe("openai validateRequest hook (Task 1.5)", () => {
     (ar) => {
       expect(() => provider.validateRequest!({
         prompt: "x", model: "gpt-image-2", ar,
-        quality: "2k", imageSize: "2K",
-        resolution: "2k", detail: "high",
+        resolution: "2k", detail: "high", detail: "high",
         refs: [],
       })).not.toThrow();
     },

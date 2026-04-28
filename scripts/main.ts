@@ -16,7 +16,6 @@ async function main() {
     model: args.flags.model,
     provider: args.flags.provider,
     ar: args.flags.ar,
-    quality: args.flags.quality,         // legacy, removed in Task 1.7
     resolution: args.flags.resolution,
     detail: args.flags.detail,
   });

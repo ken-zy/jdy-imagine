@@ -1,5 +1,4 @@
 import { describe, test, expect } from "bun:test";
-import { mapQualityToImageSize } from "./types";
 import type {
   GenerateRequest,
   GenerateResult,
@@ -10,11 +9,6 @@ import type {
   ProviderConfig,
   ChainAnchor,
 } from "./types";
-
-describe("mapQualityToImageSize", () => {
-  test("normal -> 1K", () => expect(mapQualityToImageSize("normal")).toBe("1K"));
-  test("2k -> 2K", () => expect(mapQualityToImageSize("2k")).toBe("2K"));
-});
 
 describe("ProviderConfig type", () => {
   test("requires apiKey, baseUrl, model", () => {
@@ -29,9 +23,9 @@ describe("GenerateRequest mask/editTarget", () => {
       prompt: "x",
       model: "m",
       ar: null,
-      quality: "normal",
+      resolution: "1k",
+      detail: "medium",
       refs: [],
-      imageSize: "1K",
       mask: "/tmp/m.png",
       editTarget: "/tmp/e.png",
     };
@@ -62,9 +56,9 @@ describe("Provider types", () => {
       prompt: "A cat",
       model: "gemini-3.1-flash-image-preview",
       ar: "16:9",
-      quality: "2k",
+      resolution: "2k",
+      detail: "high",
       refs: [],
-      imageSize: "2K",
     };
     expect(req.prompt).toBe("A cat");
     expect(req.refs).toEqual([]);
@@ -162,30 +156,12 @@ describe("BatchJob type", () => {
   });
 });
 
-describe("GenerateRequest additive — resolution/detail coexist with quality/imageSize", () => {
-  test("accepts resolution + detail alongside quality + imageSize", () => {
-    const req: GenerateRequest = {
-      prompt: "a cat",
-      model: "gpt-image-2",
-      ar: "16:9",
-      quality: "2k",
-      imageSize: "2K",
-      resolution: "2k",
-      detail: "high",
-      refs: [],
-    };
-    expect(req.resolution).toBe("2k");
-    expect(req.detail).toBe("high");
-    expect(req.quality).toBe("2k");
-  });
-
+describe("GenerateRequest resolution/detail enums", () => {
   test("resolution accepts 1k/2k/4k", () => {
     const reqs: GenerateRequest[] = (["1k", "2k", "4k"] as const).map((r) => ({
       prompt: "x",
       model: "m",
       ar: null,
-      quality: "2k",
-      imageSize: "2K",
       resolution: r,
       detail: "auto",
       refs: [],
@@ -198,8 +174,6 @@ describe("GenerateRequest additive — resolution/detail coexist with quality/im
       prompt: "x",
       model: "m",
       ar: null,
-      quality: "normal",
-      imageSize: "1K",
       resolution: "1k",
       detail: d,
       refs: [],

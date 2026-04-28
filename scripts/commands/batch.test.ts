@@ -120,37 +120,37 @@ import type { GenerateRequest } from "../providers/types";
 describe("validateBatchTasks for OpenAI", () => {
   test("text-only tasks pass", () => {
     expect(() => validateBatchTasks("openai", [
-      { prompt: "x", model: "m", ar: null, quality: "normal", refs: [], imageSize: "1K" },
+      { prompt: "x", model: "m", ar: null, resolution: "1k", detail: "medium", refs: [] },
     ])).not.toThrow();
   });
 
   test("tasks with refs throw", () => {
     expect(() => validateBatchTasks("openai", [
-      { prompt: "x", model: "m", ar: null, quality: "normal", refs: ["/tmp/a.png"], imageSize: "1K" },
+      { prompt: "x", model: "m", ar: null, resolution: "1k", detail: "medium", refs: ["/tmp/a.png"] },
     ])).toThrow(/text-only/i);
   });
 
   test("tasks with editTarget throw", () => {
     expect(() => validateBatchTasks("openai", [
-      { prompt: "x", model: "m", ar: null, quality: "normal", refs: [], imageSize: "1K", editTarget: "/tmp/e.png" },
+      { prompt: "x", model: "m", ar: null, resolution: "1k", detail: "medium", refs: [], editTarget: "/tmp/e.png" },
     ])).toThrow(/text-only/i);
   });
 
   test("tasks with mask throw", () => {
     expect(() => validateBatchTasks("openai", [
-      { prompt: "x", model: "m", ar: null, quality: "normal", refs: [], imageSize: "1K", mask: "/tmp/m.png" },
+      { prompt: "x", model: "m", ar: null, resolution: "1k", detail: "medium", refs: [], mask: "/tmp/m.png" },
     ])).toThrow(/text-only/i);
   });
 
   test("error message mentions character profile", () => {
     expect(() => validateBatchTasks("openai", [
-      { prompt: "x", model: "m", ar: null, quality: "normal", refs: ["/tmp/a.png"], imageSize: "1K" },
+      { prompt: "x", model: "m", ar: null, resolution: "1k", detail: "medium", refs: ["/tmp/a.png"] },
     ])).toThrow(/character/i);
   });
 
   test("google provider unaffected by validateBatchTasks", () => {
     expect(() => validateBatchTasks("google", [
-      { prompt: "x", model: "m", ar: null, quality: "normal", refs: ["/tmp/a.png"], imageSize: "1K" },
+      { prompt: "x", model: "m", ar: null, resolution: "1k", detail: "medium", refs: ["/tmp/a.png"] },
     ])).not.toThrow();
   });
 });

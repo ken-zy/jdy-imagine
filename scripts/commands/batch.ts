@@ -160,9 +160,6 @@ async function batchSubmit(
       ar: t.ar ?? config.ar,
       resolution,
       detail,
-      // Legacy fields (filled from new; Task 1.7 removes them):
-      quality: resolution === "1k" ? "normal" : "2k",
-      imageSize: resolution === "1k" ? "1K" : resolution === "2k" ? "2K" : "4K",
       refs,
     };
   });

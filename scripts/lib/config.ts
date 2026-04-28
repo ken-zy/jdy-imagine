@@ -4,12 +4,8 @@ import { join } from "path";
 export interface Config {
   provider: string;
   model: string;
-  /** Resolution tier — replaces the dimensional half of legacy `quality`. */
   resolution: "1k" | "2k" | "4k";
-  /** Detail tier — replaces the OpenAI-mapped half of legacy `quality`. */
   detail: "auto" | "low" | "medium" | "high";
-  /** @deprecated derived from `resolution`; removed in Task 1.7 cleanup */
-  quality: "normal" | "2k";
   ar: string;
   apiKey: string;
   baseUrl: string;
@@ -116,11 +112,6 @@ export function mergeConfig(
   const detail = (cliFlags.detail ??
     extendMd.default_detail ??
     DEFAULTS.detail) as "auto" | "low" | "medium" | "high";
-  // Legacy quality derived from resolution (removed in Task 1.7).
-  const derivedQuality: "normal" | "2k" = resolution === "1k" ? "normal" : "2k";
-  const quality = (cliFlags.quality ??
-    extendMd.default_quality ??
-    derivedQuality) as "normal" | "2k";
 
   return {
     provider,
@@ -131,7 +122,6 @@ export function mergeConfig(
       providerDefault.defaultModel,
     resolution,
     detail,
-    quality,
     ar:
       cliFlags.ar ??
       extendMd.default_ar ??

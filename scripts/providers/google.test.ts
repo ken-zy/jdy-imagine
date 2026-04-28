@@ -2,7 +2,6 @@ import { describe, test, expect, mock, afterEach } from "bun:test";
 import {
   buildRealtimeRequestBody,
   parseGenerateResponse,
-  mapQualityToImageSize,
   buildBatchRequestBody,
   parseBatchResponse,
   validateBatchTasks,
@@ -13,25 +12,14 @@ import {
   createGoogleProvider,
 } from "./google";
 
-describe("mapQualityToImageSize", () => {
-  test("normal -> 1K", () => {
-    expect(mapQualityToImageSize("normal")).toBe("1K");
-  });
-
-  test("2k -> 2K", () => {
-    expect(mapQualityToImageSize("2k")).toBe("2K");
-  });
-});
-
 describe("buildRealtimeRequestBody", () => {
   test("text-only prompt without refs", () => {
     const body = buildRealtimeRequestBody({
       prompt: "A cat",
       model: "gemini-3.1-flash-image-preview",
       ar: "16:9",
-      quality: "2k",
+      resolution: "2k", detail: "high",
       refs: [],
-      imageSize: "2K",
     });
     expect(body.contents[0].role).toBe("user");
     expect(body.contents[0].parts).toHaveLength(1);
@@ -46,9 +34,8 @@ describe("buildRealtimeRequestBody", () => {
       prompt: "A cat",
       model: "test",
       ar: null,
-      quality: "2k",
+      resolution: "2k", detail: "high",
       refs: [],
-      imageSize: "2K",
     });
     expect(body.contents[0].parts[0].text).not.toContain("Aspect ratio");
   });
@@ -151,14 +138,14 @@ describe("parseGenerateResponse", () => {
 describe("validateBatchTasks", () => {
   test("passes for text-only tasks", () => {
     const tasks = [
-      { prompt: "A cat", model: "test", ar: null, quality: "2k" as const, refs: [], imageSize: "2K" as const },
+      { prompt: "A cat", model: "test", ar: null, resolution: "2k", detail: "high" as const, refs: [] as const },
     ];
     expect(() => validateBatchTasks(tasks)).not.toThrow();
   });
 
   test("accepts tasks with refs", () => {
     const tasks = [
-      { prompt: "Edit this", model: "test", ar: null, quality: "2k" as const, refs: ["a.png"], imageSize: "2K" as const },
+      { prompt: "Edit this", model: "test", ar: null, resolution: "2k", detail: "high" as const, refs: ["a.png"] as const },
     ];
     expect(() => validateBatchTasks(tasks)).not.toThrow();
   });
@@ -169,7 +156,7 @@ describe("buildBatchRequestBody", () => {
     const body = buildBatchRequestBody(
       "gemini-3.1-flash-image-preview",
       [
-        { prompt: "A sunset", model: "test", ar: "16:9", quality: "2k", refs: [], imageSize: "2K" },
+        { prompt: "A sunset", model: "test", ar: "16:9", resolution: "2k", detail: "high", refs: [] },
       ],
       "test-batch",
     );
@@ -191,7 +178,7 @@ describe("buildBatchRequestBody", () => {
     const body = buildBatchRequestBody(
       "gemini-3.1-flash-image-preview",
       [
-        { prompt: "Make it blue", model: "test", ar: null, quality: "2k", refs: [refPath], imageSize: "2K" },
+        { prompt: "Make it blue", model: "test", ar: null, resolution: "2k", detail: "high", refs: [refPath] },
       ],
       "test-batch",
     );
@@ -279,9 +266,8 @@ describe("buildChainedRequestBody", () => {
         prompt: "second prompt",
         model: "test",
         ar: null,
-        quality: "2k",
+        resolution: "2k", detail: "high",
         refs: [],
-        imageSize: "2K",
       },
       anchor,
     );
@@ -325,9 +311,8 @@ describe("buildChainedRequestBody", () => {
         prompt: "wear this garment",
         model: "test",
         ar: null,
-        quality: "2k",
+        resolution: "2k", detail: "high",
         refs: [refPath],
-        imageSize: "2K",
       },
       anchor,
     );
@@ -350,9 +335,8 @@ describe("buildChainedRequestBody", () => {
         prompt: "second",
         model: "test",
         ar: "16:9",
-        quality: "2k",
+        resolution: "2k", detail: "high",
         refs: [],
-        imageSize: "2K",
       },
       anchor,
     );
@@ -368,9 +352,8 @@ describe("createGoogleAnchor", () => {
       prompt: "first prompt",
       model: "test",
       ar: "1:1" as string | null,
-      quality: "2k" as const,
-      refs: [],
-      imageSize: "2K" as const,
+      resolution: "2k", detail: "high" as const,
+      refs: [] as const,
     };
 
     const rawResponse = {
@@ -408,9 +391,8 @@ describe("createGoogleAnchor", () => {
       prompt: "blocked prompt",
       model: "test",
       ar: null as string | null,
-      quality: "2k" as const,
-      refs: [],
-      imageSize: "2K" as const,
+      resolution: "2k", detail: "high" as const,
+      refs: [] as const,
     };
 
     // SAFETY response: candidate exists but no content
@@ -433,8 +415,8 @@ describe("buildBatchJsonl", () => {
     const { data, keys } = buildBatchJsonl(
       "gemini-3.1-flash-image-preview",
       [
-        { prompt: "A sunset over mountains", model: "test", ar: "16:9", quality: "2k", refs: [], imageSize: "2K" },
-        { prompt: "A cat sleeping", model: "test", ar: null, quality: "normal", refs: [], imageSize: "1K" },
+        { prompt: "A sunset over mountains", model: "test", ar: "16:9", resolution: "2k", detail: "high", refs: [] },
+        { prompt: "A cat sleeping", model: "test", ar: null, resolution: "1k", detail: "medium", refs: [] },
       ],
       "test-batch",
     );
@@ -459,7 +441,7 @@ describe("buildBatchJsonl", () => {
   test("includes aspect ratio in prompt text", () => {
     const { data } = buildBatchJsonl(
       "test-model",
-      [{ prompt: "A cat", model: "test", ar: "16:9", quality: "2k", refs: [], imageSize: "2K" }],
+      [{ prompt: "A cat", model: "test", ar: "16:9", resolution: "2k", detail: "high", refs: [] }],
       "test",
     );
 
@@ -478,7 +460,7 @@ describe("buildBatchJsonl", () => {
 
     const { data } = buildBatchJsonl(
       "test-model",
-      [{ prompt: "Edit this", model: "test", ar: null, quality: "2k", refs: [refPath], imageSize: "2K" }],
+      [{ prompt: "Edit this", model: "test", ar: null, resolution: "2k", detail: "high", refs: [refPath] }],
       "test",
     );
 
@@ -492,7 +474,7 @@ describe("buildBatchJsonl", () => {
   test("returns Uint8Array with trailing newline", () => {
     const { data } = buildBatchJsonl(
       "test-model",
-      [{ prompt: "A cat", model: "test", ar: null, quality: "normal", refs: [], imageSize: "1K" }],
+      [{ prompt: "A cat", model: "test", ar: null, resolution: "1k", detail: "medium", refs: [] }],
       "test",
     );
     const text = new TextDecoder().decode(data);
@@ -704,7 +686,7 @@ describe("batchCreate (file-based)", () => {
     const provider = createGoogleProvider("fake-key", "https://generativelanguage.googleapis.com");
     const job = await provider.batchCreate!({
       model: "gemini-3.1-flash-image-preview",
-      tasks: [{ prompt: "A cat", model: "test", ar: null, quality: "normal", refs: [], imageSize: "1K" }],
+      tasks: [{ prompt: "A cat", model: "test", ar: null, resolution: "1k", detail: "medium", refs: [] }],
     });
 
     expect(job.id).toBe("batches/job1");
@@ -788,9 +770,8 @@ describe("createGoogleProvider editTarget fallback", () => {
       prompt: "test",
       model: "m",
       ar: null,
-      quality: "normal",
+      resolution: "1k", detail: "medium",
       refs: [tmpRef],
-      imageSize: "1K",
       editTarget: tmpEdit,
     });
 
@@ -810,9 +791,8 @@ describe("createGoogleProvider mask rejection", () => {
       prompt: "x",
       model: "m",
       ar: null,
-      quality: "normal",
+      resolution: "1k", detail: "medium",
       refs: [],
-      imageSize: "1K",
       mask: "/tmp/m.png",
     })).rejects.toThrow(/Google.*does not support.*mask/i);
   });
@@ -845,8 +825,7 @@ describe("google validateRequest hook (Task 1.4)", () => {
   test("rejects resolution=4k", () => {
     expect(() => provider.validateRequest!({
       prompt: "x", model: "m", ar: "16:9",
-      quality: "2k", imageSize: "2K",
-      resolution: "4k", detail: "high",
+      resolution: "4k", detail: "high", detail: "high",
       refs: [],
     })).toThrow(/4k/);
   });
@@ -854,8 +833,7 @@ describe("google validateRequest hook (Task 1.4)", () => {
   test("rejects unsupported ar 5:4", () => {
     expect(() => provider.validateRequest!({
       prompt: "x", model: "m", ar: "5:4",
-      quality: "2k", imageSize: "2K",
-      resolution: "2k", detail: "high",
+      resolution: "2k", detail: "high", detail: "high",
       refs: [],
     })).toThrow(/5:4/);
   });
@@ -865,8 +843,7 @@ describe("google validateRequest hook (Task 1.4)", () => {
     (ar) => {
       expect(() => provider.validateRequest!({
         prompt: "x", model: "m", ar,
-        quality: "2k", imageSize: "2K",
-        resolution: "2k", detail: "high",
+        resolution: "2k", detail: "high", detail: "high",
         refs: [],
       })).not.toThrow();
     },
@@ -877,8 +854,7 @@ describe("google deriveGoogleImageSize via buildRealtimeRequestBody (Task 1.4)",
   test("resolution=1k → imageSize=1K", () => {
     const body = buildRealtimeRequestBody({
       prompt: "x", model: "m", ar: null,
-      quality: "normal", imageSize: "1K",
-      resolution: "1k", detail: "auto",
+      resolution: "1k", detail: "medium", detail: "auto",
       refs: [],
     });
     expect(body.generationConfig.imageConfig.imageSize).toBe("1K");
@@ -887,8 +863,7 @@ describe("google deriveGoogleImageSize via buildRealtimeRequestBody (Task 1.4)",
   test("resolution=2k → imageSize=2K", () => {
     const body = buildRealtimeRequestBody({
       prompt: "x", model: "m", ar: null,
-      quality: "2k", imageSize: "2K",
-      resolution: "2k", detail: "high",
+      resolution: "2k", detail: "high", detail: "high",
       refs: [],
     });
     expect(body.generationConfig.imageConfig.imageSize).toBe("2K");
@@ -897,8 +872,7 @@ describe("google deriveGoogleImageSize via buildRealtimeRequestBody (Task 1.4)",
   test("resolution=4k throws", () => {
     expect(() => buildRealtimeRequestBody({
       prompt: "x", model: "m", ar: null,
-      quality: "2k", imageSize: "2K",
-      resolution: "4k", detail: "high",
+      resolution: "4k", detail: "high", detail: "high",
       refs: [],
     })).toThrow(/4k/);
   });
