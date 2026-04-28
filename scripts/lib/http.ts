@@ -145,6 +145,95 @@ export async function httpGetWithRetry(
   return withRetry(() => httpGet(url, apiKey));
 }
 
+export interface HttpTextResponse {
+  status: number;
+  text: string;
+}
+
+export async function httpGetText(
+  url: string,
+  headers: Record<string, string>,
+): Promise<HttpTextResponse> {
+  const proxy = detectProxy(process.env as Record<string, string>);
+  if (proxy) {
+    return curlGetText(url, headers, proxy);
+  }
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), TOTAL_TIMEOUT);
+  try {
+    const res = await fetch(url, { headers, signal: controller.signal });
+    const text = await res.text();
+    return { status: res.status, text };
+  } catch (err) {
+    return { status: 503, text: `Network error: ${(err as Error).message}` };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function curlGetText(
+  url: string,
+  headers: Record<string, string>,
+  proxy: string,
+): HttpTextResponse {
+  const args = [
+    "-s",
+    "--connect-timeout", String(CONNECT_TIMEOUT / 1000),
+    "--max-time", String(TOTAL_TIMEOUT / 1000),
+    "-x", proxy,
+    "-w", "\n%{http_code}",
+  ];
+  for (const [k, v] of Object.entries(headers)) {
+    args.push("-H", `${k}: ${v}`);
+  }
+  args.push(url);
+  try {
+    const output = execFileSync("curl", args, {
+      encoding: "utf-8",
+      maxBuffer: 50 * 1024 * 1024,
+    });
+    const lines = output.trimEnd().split("\n");
+    const statusCode = parseInt(lines.pop()!, 10);
+    return { status: statusCode, text: lines.join("\n") };
+  } catch (err) {
+    return { status: 503, text: `curl error: ${(err as Error).message}` };
+  }
+}
+
+export async function httpPostMultipart(
+  url: string,
+  formData: FormData,
+  headers: Record<string, string>,
+): Promise<HttpResponse> {
+  const proxy = detectProxy(process.env as Record<string, string>);
+  if (proxy) {
+    return { status: 503, data: { error: { message: "Multipart upload not supported through HTTP proxy" } } };
+  }
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), TOTAL_TIMEOUT);
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers,
+      body: formData,
+      signal: controller.signal,
+    });
+    const text = await res.text();
+    let data: unknown;
+    try {
+      data = JSON.parse(text);
+    } catch {
+      data = { error: { message: `Non-JSON response (${res.status}): ${text.slice(0, 200)}` } };
+      return { status: 502, data };
+    }
+    return { status: res.status, data };
+  } catch (err) {
+    return { status: 503, data: { error: { message: `Network error: ${(err as Error).message}` } } };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 export async function httpGet(
   url: string,
   apiKey: string,
