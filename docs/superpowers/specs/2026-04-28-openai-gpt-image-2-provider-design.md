@@ -517,7 +517,7 @@ if (result.finishReason === "ERROR") {
 - `providers/openai.ts`：增加 `batchCreate/Get/Fetch/List/Cancel`；增加 `mapOpenAIBatchState`；用 `httpGetText` 下载 output JSONL；request_counts → stats、output_file_id → responsesFile
 - `providers/openai.test.ts`：batch case 含 state 映射全覆盖（含未知状态 default 行为）；output_file_id download 用 mock httpGetText
 - `commands/batch.ts`：`validateBatchTasks` 新增"OpenAI provider + tasks 含任何 image 输入 → throw"；错误信息包含 character profile 提示
-- 验收：`--provider openai batch submit text-only-prompts.json` 能跑通；`--provider openai batch submit prompts-with-refs.json` 报错；`--provider openai --character p.yaml batch submit any.json` 报错
+- 验收：`batch submit text-only-prompts.json --provider openai` 能跑通；`batch submit prompts-with-refs.json --provider openai` 报错；`batch submit any.json --provider openai --character p.yaml` 报错
 
 ### Step 6 — 命令层 wiring + 能力校验
 - `commands/generate.ts`：flags.edit/mask 透传；增加 `validateProviderCapabilities()`；新增 `finishReason === "ERROR"` 分支输出 safetyInfo.reason
