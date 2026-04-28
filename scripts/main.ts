@@ -19,8 +19,9 @@ async function main() {
 
   // Validate API key
   if (!config.apiKey) {
+    const envName = config.provider === "openai" ? "OPENAI_API_KEY" : "GOOGLE_API_KEY";
     console.error(
-      "Missing API key. Set GOOGLE_API_KEY or GEMINI_API_KEY environment variable,\n" +
+      `Missing API key. Set ${envName} environment variable,\n` +
       "or create a .env file at .jdy-imagine/.env or ~/.jdy-imagine/.env",
     );
     process.exit(1);

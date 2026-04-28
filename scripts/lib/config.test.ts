@@ -85,3 +85,52 @@ describe("mergeConfig", () => {
     expect(config.ar).toBe("1:1");
   });
 });
+
+describe("mergeConfig with openai provider", () => {
+  test("reads OPENAI_API_KEY when provider=openai", () => {
+    const c = mergeConfig(
+      { provider: "openai" },
+      {},
+      { OPENAI_API_KEY: "sk-openai", GOOGLE_API_KEY: "should-not-be-used" },
+    );
+    expect(c.apiKey).toBe("sk-openai");
+    expect(c.baseUrl).toBe("https://api.openai.com");
+  });
+
+  test("reads OPENAI_BASE_URL override", () => {
+    const c = mergeConfig(
+      { provider: "openai" },
+      {},
+      { OPENAI_API_KEY: "k", OPENAI_BASE_URL: "https://proxy.example.com" },
+    );
+    expect(c.baseUrl).toBe("https://proxy.example.com");
+  });
+
+  test("reads OPENAI_IMAGE_MODEL override", () => {
+    const c = mergeConfig(
+      { provider: "openai" },
+      {},
+      { OPENAI_API_KEY: "k", OPENAI_IMAGE_MODEL: "gpt-image-1.5" },
+    );
+    expect(c.model).toBe("gpt-image-1.5");
+  });
+
+  test("model defaults to gpt-image-2 when no override for openai", () => {
+    const c = mergeConfig(
+      { provider: "openai" },
+      {},
+      { OPENAI_API_KEY: "k" },
+    );
+    expect(c.model).toBe("gpt-image-2");
+  });
+
+  test("google regression: model still defaults to gemini-3.1-flash-image-preview", () => {
+    const c = mergeConfig(
+      { provider: "google" },
+      {},
+      { GOOGLE_API_KEY: "k" },
+    );
+    expect(c.model).toBe("gemini-3.1-flash-image-preview");
+    expect(c.apiKey).toBe("k");
+  });
+});

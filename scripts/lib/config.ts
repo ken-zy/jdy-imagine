@@ -10,13 +10,21 @@ export interface Config {
   baseUrl: string;
 }
 
-const DEFAULTS: Config = {
+const DEFAULTS = {
   provider: "google",
-  model: "gemini-3.1-flash-image-preview",
-  quality: "2k",
+  quality: "2k" as const,
   ar: "1:1",
-  apiKey: "",
-  baseUrl: "https://generativelanguage.googleapis.com",
+};
+
+const PROVIDER_DEFAULTS: Record<string, { baseUrl: string; defaultModel: string }> = {
+  google: {
+    baseUrl: "https://generativelanguage.googleapis.com",
+    defaultModel: "gemini-3.1-flash-image-preview",
+  },
+  openai: {
+    baseUrl: "https://api.openai.com",
+    defaultModel: "gpt-image-2",
+  },
 };
 
 export function parseExtendMd(
@@ -55,16 +63,34 @@ export function mergeConfig(
   extendMd: Record<string, string>,
   env: Record<string, string | undefined>,
 ): Config {
+  const provider =
+    cliFlags.provider ??
+    extendMd.default_provider ??
+    DEFAULTS.provider;
+
+  const providerDefault = PROVIDER_DEFAULTS[provider] ?? PROVIDER_DEFAULTS.google;
+
+  let apiKey = "";
+  let baseUrl = providerDefault.baseUrl;
+  let envModel: string | undefined;
+
+  if (provider === "google") {
+    apiKey = env.GOOGLE_API_KEY ?? env.GEMINI_API_KEY ?? "";
+    baseUrl = env.GOOGLE_BASE_URL ?? baseUrl;
+    envModel = env.GOOGLE_IMAGE_MODEL;
+  } else if (provider === "openai") {
+    apiKey = env.OPENAI_API_KEY ?? "";
+    baseUrl = env.OPENAI_BASE_URL ?? baseUrl;
+    envModel = env.OPENAI_IMAGE_MODEL;
+  }
+
   return {
-    provider:
-      cliFlags.provider ??
-      extendMd.default_provider ??
-      DEFAULTS.provider,
+    provider,
     model:
       cliFlags.model ??
       extendMd.default_model ??
-      env.GOOGLE_IMAGE_MODEL ??
-      DEFAULTS.model,
+      envModel ??
+      providerDefault.defaultModel,
     quality: (cliFlags.quality ??
       extendMd.default_quality ??
       DEFAULTS.quality) as "normal" | "2k",
@@ -72,13 +98,8 @@ export function mergeConfig(
       cliFlags.ar ??
       extendMd.default_ar ??
       DEFAULTS.ar,
-    apiKey:
-      env.GOOGLE_API_KEY ??
-      env.GEMINI_API_KEY ??
-      DEFAULTS.apiKey,
-    baseUrl:
-      env.GOOGLE_BASE_URL ??
-      DEFAULTS.baseUrl,
+    apiKey,
+    baseUrl,
   };
 }
 
