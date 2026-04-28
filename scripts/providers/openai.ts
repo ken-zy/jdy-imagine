@@ -23,23 +23,31 @@ import type {
 
 // === Mappings ===
 
+// Each (quality, ar) maps to a true-aspect-ratio WIDTHxHEIGHT that satisfies
+// gpt-image-2 constraints (both edges multiples of 16, total pixels in
+// [655_360, 8_294_400], max edge ≤ 3840, long:short ≤ 3:1).
+//
+// Note: 16:9 and 9:16 are real 1.778:1 ratios (1536x864 / 864x1536) rather than
+// being silently degraded to 3:2 (1536x1024). Earlier draft used OpenAI's
+// "popular sizes" of 1536x1024 / 1024x1536 for both 16:9 AND 3:2, which would
+// have given users the wrong aspect ratio when they asked for widescreen.
 const SIZE_TABLE: Record<"normal" | "2k", Record<string, string>> = {
   normal: {
-    "1:1":  "1024x1024",
-    "16:9": "1536x1024",
-    "9:16": "1024x1536",
-    "3:2":  "1536x1024",
+    "1:1":  "1024x1024",  // 1.05M px
+    "16:9": "1536x864",   // 1.33M px (864 = 54*16)
+    "9:16": "864x1536",
+    "3:2":  "1536x1024",  // 1.57M px
     "2:3":  "1024x1536",
-    "4:3":  "1280x960",
+    "4:3":  "1280x960",   // 1.23M px
     "3:4":  "960x1280",
   },
   "2k": {
-    "1:1":  "2048x2048",
-    "16:9": "2048x1152",
+    "1:1":  "2048x2048",  // 4.19M px
+    "16:9": "2048x1152",  // 2.36M px (already true 16:9)
     "9:16": "1152x2048",
-    "3:2":  "2304x1536",
+    "3:2":  "2304x1536",  // 3.54M px
     "2:3":  "1536x2304",
-    "4:3":  "2048x1536",
+    "4:3":  "2048x1536",  // 3.15M px
     "3:4":  "1536x2048",
   },
 };

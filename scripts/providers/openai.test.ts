@@ -14,8 +14,8 @@ import {
 describe("mapToOpenAISize", () => {
   const cases: Array<["normal" | "2k", string, string]> = [
     ["normal", "1:1", "1024x1024"],
-    ["normal", "16:9", "1536x1024"],
-    ["normal", "9:16", "1024x1536"],
+    ["normal", "16:9", "1536x864"],   // true 16:9, not 3:2
+    ["normal", "9:16", "864x1536"],
     ["normal", "3:2", "1536x1024"],
     ["normal", "2:3", "1024x1536"],
     ["normal", "4:3", "1280x960"],
