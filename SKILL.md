@@ -29,8 +29,10 @@ bun scripts/main.ts generate --provider openai \
 ### Batch generation (50% cost savings)
 ```bash
 bun scripts/main.ts batch submit prompts.json --outdir ./images
-bun scripts/main.ts --provider openai batch submit text-only-prompts.json --outdir ./images
+bun scripts/main.ts batch submit text-only-prompts.json --provider openai --outdir ./images
 ```
+
+(Note: `command` must come before flags. `--provider openai batch submit ...` will not parse — `--provider` would be consumed as a flag and `command` would be empty.)
 
 ### Options
 - `--provider`: `google` (default) or `openai`

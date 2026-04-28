@@ -2431,7 +2431,7 @@ bun scripts/main.ts generate --provider openai --prompt "Replace background" --e
 ### Batch generation (50% cost savings)
 ```bash
 bun scripts/main.ts batch submit prompts.json --outdir ./images
-bun scripts/main.ts --provider openai batch submit text-only-prompts.json --outdir ./images
+bun scripts/main.ts batch submit text-only-prompts.json --provider openai --outdir ./images
 ```
 
 ### Options
@@ -2521,7 +2521,7 @@ bun scripts/main.ts generate --provider openai \
 
 Server-side batch (text-only, 50% off, 24h SLA):
 ```bash
-bun scripts/main.ts --provider openai batch submit prompts.json --outdir ./images --async
+bun scripts/main.ts batch submit prompts.json --provider openai --outdir ./images --async
 ```
 ````
 
