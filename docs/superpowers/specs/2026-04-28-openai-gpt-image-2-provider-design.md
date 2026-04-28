@@ -40,7 +40,7 @@ jdy-imagine 当前只支持 Google Gemini 一个 provider（`scripts/main.ts:7` 
 | Provider 切换 联动 model | `resolveConfig` 不再写死 default；未传 `--model` 时取 `provider.defaultModel` | 修复隐含耦合 |
 | `mask` 在 Google | provider 收到时 throw | 不静默丢弃 |
 | `chain` 在 OpenAI | provider 不实现 `generateChained`，generate.ts 现有逻辑自动 throw | OpenAI image API 无状态 |
-| 服务端 batch + edit | OpenAI batch 不支持 multipart endpoint，含 `editTarget` 任务 → throw | 不做降级 |
+| OpenAI 服务端 batch | **限定 text-only**：tasks 含任何 `refs` / `editTarget` / `mask`（含 character profile 注入的 refs）→ throw | YAGNI：批量场景主要是 text-to-image，image 输入需要 Files API + file_id 流，复杂度大；后续可单独扩展（详见 Risks 第 8 条） |
 | 错误映射 | OpenAI 400 + `moderation_blocked` → `finishReason="SAFETY"`；其他 400 → `"ERROR"` | 跟 Gemini 抽象层统一 |
 | Env 变量 | `OPENAI_API_KEY` / `OPENAI_BASE_URL`（默认 `https://api.openai.com`）/ `OPENAI_IMAGE_MODEL`（默认 `gpt-image-2`） | 标准命名 |
 
@@ -66,7 +66,7 @@ CLI args → main.ts → resolveConfig → providerFactory(ProviderConfig) → p
 
 | 文件 | 状态 | 改动 |
 |---|---|---|
-| `scripts/lib/http.ts` | 重构 | `httpPost/httpGet` 签名 `(url, body, apiKey)` → `(url, body, headers)`；新增 `httpPostMultipart(url, formData, headers)`；retry/proxy/curl 分支同步 |
+| `scripts/lib/http.ts` | 重构 | `httpPost/httpGet` 签名 `(url, body, apiKey)` → `(url, body, headers)`；新增 `httpPostMultipart(url, formData, headers)` 给 OpenAI edit 用；新增 `httpGetText(url, headers): Promise<{status, text}>` 给 OpenAI batch fetch 下载 JSONL（不走 JSON.parse，保留 raw text）；retry/proxy/curl 分支同步 |
 | `scripts/lib/config.ts` | 改造 | 按 `provider` 字段选 env 组（GOOGLE_* vs OPENAI_*）；移除 `DEFAULTS.model`（改由 provider 兜底） |
 | `scripts/lib/args.ts` | 改造 | 新增 `--edit <path>` / `--mask <path>` |
 | `scripts/providers/types.ts` | 改造 | 新增 `ProviderConfig` 接口；`ProviderFactory` 改签名；`GenerateRequest` 加 `mask?` / `editTarget?`；`GenerateResult.finishReason` 删 `MAX_TOKENS` 加 `ERROR`；`safetyInfo.category` 改 optional |
@@ -74,7 +74,7 @@ CLI args → main.ts → resolveConfig → providerFactory(ProviderConfig) → p
 | `scripts/providers/openai.ts` | 新建 | factory + generate（路由）+ batchCreate/Get/Fetch/List/Cancel + mapToOpenAISize 表 + headers 拼接 + 错误映射 |
 | `scripts/main.ts` | 改造 | `PROVIDERS` 注册 `openai`；factory 调用改为 `ProviderConfig`；config.model 为空时用 `provider.defaultModel` 兜底 |
 | `scripts/commands/generate.ts` | 小改 | flags.edit / flags.mask 透传到 `GenerateRequest`；新增 `validateProviderCapabilities()` |
-| `scripts/commands/batch.ts` | 小改 | mask/editTarget 透传；payload 估算考虑 mask；OpenAI batch + editTarget 校验 |
+| `scripts/commands/batch.ts` | 小改 | OpenAI provider 下 `validateBatchTasks` 拒绝任何 image input（refs / editTarget / mask / character profile 注入的 refs）→ throw；`writeResults` 处理 `finishReason === "ERROR"` 分支；text-only JSONL 走 `/v1/images/generations` |
 | `SKILL.md` | 改 | 描述提到双 provider；新增 `--provider openai` 用法和 `OPENAI_API_KEY` 配置 |
 | `README.md` | 改 | 加能力矩阵表；同步 env 配置说明 |
 | 各 `*.test.ts` | 加 case | 见 §4 |
@@ -201,6 +201,24 @@ export interface ParsedArgs {
 }
 ```
 
+### Batch 状态映射（OpenAI provider 内部）
+
+```ts
+function mapOpenAIBatchState(raw: string): BatchJob["state"] {
+  switch (raw) {
+    case "validating": return "pending";
+    case "in_progress": return "running";
+    case "finalizing": return "running";
+    case "cancelling": return "running";
+    case "completed": return "succeeded";
+    case "failed": return "failed";
+    case "expired": return "expired";
+    case "cancelled": return "cancelled";
+    default: return "pending";  // 未知状态保守降级，避免误触 fetch
+  }
+}
+```
+
 ### OpenAI provider 内部（不进 types.ts）
 
 ```ts
@@ -231,7 +249,7 @@ const SIZE_TABLE: Record<"normal" | "2k", Record<string, string>> = {
 //   2k     → "high"
 //   不暴露 low / auto
 
-// Generations payload (无 editTarget 时)
+// Generations payload (text-only 路径：editTarget/refs/mask 全部为空)
 type OpenAIGenerationsPayload = {
   model: string;
   prompt: string;
@@ -241,16 +259,19 @@ type OpenAIGenerationsPayload = {
   output_format: "png";
 };
 
-// Edits multipart fields (editTarget 非空时)
-//   image: editTarget 在首位 + refs 跟随
-//   mask: 可选
+// Edits multipart fields (任意 image 输入：editTarget OR refs OR mask 任一非空)
+//   image[]: editTarget 在首位（若有），refs 紧随其后（含 character refs）
+//            （refs-only 场景：refs 直接作为 image[]，不需要 editTarget）
+//   mask: 可选；mask 默认作用于 image[0]，因此 mask 必须配合 editTarget 或 refs 才有意义
 //   不传 input_fidelity（gpt-image-2 强制 high）
 
-// Batch JSONL 行
+// Batch JSONL 行（本设计 text-only batch，url 固定 /v1/images/generations；
+// 这是 spec 范围内的 YAGNI 选择，不是 OpenAI API 限制 — OpenAI batch 实际支持
+// /v1/images/edits with file_id JSON body，详见 Risks 第 8 条）
 type OpenAIBatchLine = {
   custom_id: string;        // 复用 jdy-imagine "001-slug"
   method: "POST";
-  url: "/v1/images/generations";   // batch 仅支持 generations，不支持 edits
+  url: "/v1/images/generations";
   body: OpenAIGenerationsPayload;
 };
 ```
@@ -280,14 +301,19 @@ runGenerate:
 ├─ validateGenerateArgs (existing)
 ├─ validateProviderCapabilities (NEW):
 │   ├─ flags.mask && provider.name !== "openai" → throw
-│   ├─ flags.mask && !flags.edit → warn (软警告)
+│   ├─ flags.mask && !flags.edit && (!flags.ref || flags.ref.length === 0) → throw "mask requires --edit or --ref"
 │   └─ flags.chain && !provider.generateChained → throw
 ├─ loadCharacter / loadPrompts (existing)
 ├─ for each task:
 │   build GenerateRequest{prompt, model, ar, quality, refs, imageSize, editTarget, mask}
 └─ provider.generate(req) → ROUTE inside openai.ts:
-                            ├─ if editTarget: buildEditFormData → POST /v1/images/edits (multipart)
-                            └─ else: buildGenerationsPayload → POST /v1/images/generations (JSON)
+                            ├─ if (editTarget || refs.length > 0 || mask):
+                            │     // 任何图像输入（编辑目标 / 参考图 / 蒙版）都走 edits 端点
+                            │     buildEditFormData → POST /v1/images/edits (multipart)
+                            │     image[] 顺序: editTarget 首位（若有），refs 跟随
+                            │     mask 仅当存在时附加（mask 默认绑定 image[0]，即 editTarget 或 refs[0]）
+                            └─ else:
+                                  buildGenerationsPayload → POST /v1/images/generations (JSON)
                                                               ↓
                                                        response.data[].b64_json
                                                               ↓
@@ -296,6 +322,8 @@ runGenerate:
                             handle finishReason → writeImage(outdir, ...)
 ```
 
+**关键修正**：路由条件不只看 `editTarget`，**`refs.length > 0` 也触发 `/edits` 端点**——OpenAI 的"参考图工作流"实际是 `/v1/images/edits` 的 `image[]`，不是 `/v1/images/generations`（后者无 image input 字段）。如果只看 editTarget 路由，`--ref a.png --prompt "..."` 在 OpenAI 下会**静默丢图**。
+
 ### 3.2 batch 命令（OpenAI 服务端）
 
 ```
@@ -303,8 +331,10 @@ batch submit prompts.json
 ─────────────────────────
 batchSubmit (existing):
 ├─ load tasks, apply character (existing)
-├─ validateBatchTasks (NEW):
-│   └─ openai && tasks.some(editTarget) → throw "OpenAI 服务端 batch 不支持图像编辑"
+├─ validateBatchTasks (NEW)：OpenAI 走 text-only 路径
+│   └─ provider.name === "openai" && tasks.some(t =>
+│        t.refs.length > 0 || t.editTarget || t.mask) → throw
+│      错误信息明确说明：character profile 注入的 refs 也算
 ├─ provider.batchCreate(req) → openai.batchCreate:
 │   ├─ buildOpenAIBatchJsonl(tasks):
 │   │   每行 {custom_id, method:"POST", url:"/v1/images/generations", body: payload}
@@ -313,19 +343,39 @@ batchSubmit (existing):
 │   │   {input_file_id: fileId,
 │   │    endpoint: "/v1/images/generations",
 │   │    completion_window: "24h"}
-│   └─ return BatchJob{id: "batch_xxx", state, createTime}
+│   └─ return BatchJob{id, state: mapOpenAIState(rawState), createTime, ...}
 ├─ saveManifest (existing)
 └─ if !async: pollAndFetch (existing)
 
 batch fetch <jobId>
 ───────────────────
 provider.batchFetch(jobId) → openai.batchFetch:
-├─ GET /v1/batches/{id} → output_file_id
-├─ GET /v1/files/{output_file_id}/content → JSONL
-└─ for each line: parse → BatchResult[]
+├─ GET /v1/batches/{id} → 解析 output_file_id 和 state
+├─ httpGetText("/v1/files/{output_file_id}/content") → raw JSONL text
+│   （不能用现有 httpGet，会 JSON.parse 失败返回 502）
+└─ for each line: parse → {custom_id, response.body.data[0].b64_json} → BatchResult[]
 ```
 
-**关键限制**：OpenAI 服务端 batch 只支持 `/v1/images/generations`（JSON body），**不支持 `/v1/images/edits`（multipart）**。含 `editTarget` 的任务在 batch 路径上 throw，不做降级。
+**关键修正 1**：OpenAI batch **限定 text-only**（YAGNI）。tasks 含任何 image 输入（refs / editTarget / mask / character refs）时直接 throw，不做降级。理由：
+- 批量场景主要是 text-to-image 大量生成（拿 50% 折扣的常见用法）
+- image-conditioned batch 需要先把所有本地图上传到 `/v1/files`（purpose=`vision`），再在 JSONL 里用 `image_file_id` 引用，是个独立子项目（详见 Risks 第 8 条）
+
+**关键修正 2**：OpenAI batch state 必须显式映射，否则现有 `pollAndFetch` 永远等不到 `succeeded`：
+
+| OpenAI raw state | jdy-imagine state |
+|---|---|
+| `validating` | `pending` |
+| `in_progress` | `running` |
+| `finalizing` | `running` |
+| `completed` | `succeeded` |
+| `failed` | `failed` |
+| `expired` | `expired` |
+| `cancelling` | `running` |
+| `cancelled` | `cancelled` |
+
+并把 OpenAI 响应里的 `request_counts.{total, completed, failed}` 映射到 `BatchJob.stats.{total, succeeded, failed}`，`output_file_id` 映射到 `BatchJob.responsesFile`。
+
+**关键修正 3**：batch fetch 必须用 `httpGetText`（新 helper）而非现有 `httpGet`——OpenAI 的 `/v1/files/{id}/content` 返回的是 raw JSONL（不是 JSON 包装），现有 `httpGet` 会因 `JSON.parse` 失败把它转成 502 错误。
 
 ### 3.3 错误映射
 
@@ -338,21 +388,41 @@ provider.batchFetch(jobId) → openai.batchFetch:
 | 401 / 403 | `throw new Error("OpenAI auth failed: ...")` |
 | 429 / 500 / 503 | `lib/http.ts` 现有 retry → 失败仍 throw |
 
+**ERROR finishReason 的命令层处理（NEW）**：
+
+`runGenerate` 和 `writeResults`（batch）都要新增 `ERROR` 分支，否则 OpenAI 的真实错误信息会被现有 "No image generated" 泛化提示覆盖：
+
+```ts
+// commands/generate.ts 新增分支（在 SAFETY 检查之后、images.length === 0 之前）
+if (result.finishReason === "ERROR") {
+  const msg = result.safetyInfo?.reason ?? "Provider returned error";
+  if (flags.json) {
+    console.log(JSON.stringify({ error: msg, finishReason: "ERROR" }));
+  } else {
+    console.error(`Error: ${msg}`);
+  }
+  if (!useChain) process.exit(1);
+  continue;  // chain 中非首任务跳过
+}
+
+// commands/batch.ts writeResults() 同样：finishReason === "ERROR" 时输出 safetyInfo.reason
+```
+
 ### 3.4 能力矩阵
 
 | Flag / 能力 | Google | OpenAI | 备注 |
 |---|---|---|---|
 | `--prompt` | ✓ | ✓ | |
-| `--ref <path>` | ✓ | ✓ | 两家都视为参考图 |
-| `--edit <path>` | ✓ fallback | ✓ 原生 | Google 当 ref[0]，OpenAI 路由 /edits |
-| `--mask <path>` | × throw | ✓（需 --edit） | |
+| `--ref <path>` | ✓ | ✓ | Google 拼 inlineData；OpenAI 走 /edits 端点的 image[] |
+| `--edit <path>` | ✓ fallback | ✓ 原生 | Google 当 ref[0]，OpenAI 走 /edits 且置 image[0] |
+| `--mask <path>` | × throw | ✓（需 --edit 或 --ref） | |
 | `--ar` | ✓ | ✓ | OpenAI 经 SIZE_TABLE |
 | `--quality normal\|2k` | ✓ | ✓ | OpenAI 映射 medium/high |
 | `--chain` | ✓ | × throw | OpenAI image API 无状态 |
 | `--character` | ✓ | ✓ | provider-agnostic |
-| `batch submit` | ✓ | ✓ | OpenAI 用服务端 /v1/batches |
+| `batch submit` (text-only) | ✓ | ✓ | OpenAI 用服务端 /v1/batches |
 | `batch submit --async` | ✓ | ✓ | |
-| Batch 含 editTarget | ✓ | × throw | OpenAI batch 不支持 multipart |
+| Batch 含 refs/editTarget/mask/character | ✓ | × throw | OpenAI batch 限定 text-only（YAGNI；详见 Risks 第 8 条） |
 | 4K / 任意尺寸 | × | × | 按方案 A 砍掉 |
 | 真透明背景 | × | × | gpt-image-2 不支持 |
 
@@ -364,10 +434,15 @@ provider.batchFetch(jobId) → openai.batchFetch:
 1. validateGenerateArgs() — 现有：prompt/prompts 互斥
 2. validateProviderCapabilities() — NEW：
    - flags.mask && provider.name !== "openai" → throw
-   - flags.mask && !flags.edit → warn
+   - flags.mask && !flags.edit && (!flags.ref || flags.ref.length === 0) → throw
+     "mask requires --edit or --ref to specify the image being masked"
    - flags.chain && !provider.generateChained → throw
 3. (batch 路径) validateBatchTasks() — NEW：
-   - provider.name === "openai" && tasks.some(t => t.editTarget) → throw
+   - provider.name === "openai" && tasks.some(t =>
+       t.refs.length > 0 || t.editTarget || t.mask) → throw
+     "OpenAI 服务端 batch 暂仅支持 text-only 任务，不支持 --ref / --edit / --mask
+      / character profile（character profile 会注入 refs，等价于不支持）。
+      如需 image-conditioned 大批量生成，请用 realtime 模式或等待 file_id batch 支持。"
 ```
 
 ---
@@ -381,21 +456,21 @@ provider.batchFetch(jobId) → openai.batchFetch:
 
 | 文件 | 状态 | 关键测试 |
 |---|---|---|
-| `scripts/providers/openai.test.ts` | 新建 | SIZE_TABLE 表驱动（quality × ar 全覆盖）；`mapToOpenAIQuality()`；`buildGenerationsPayload(req)`；`buildEditFormData(req)`（含 mask）；`parseOpenAIResponse()`（b64 解码）；`mapOpenAIError()`（moderation_blocked → SAFETY；invalid_size → ERROR；401 → throw）；`buildOpenAIBatchJsonl(tasks)`；5 个 batch 方法 mock 测试；editTarget 在 batch tasks → throw |
-| `scripts/lib/http.test.ts` | 改造 | 新签名 `(url, body, headers)`；`httpPostMultipart` 新增；retry/proxy/curl 分支适配 headers map |
+| `scripts/providers/openai.test.ts` | 新建 | SIZE_TABLE 表驱动（quality × ar 全覆盖）；`mapToOpenAIQuality()`；`mapOpenAIBatchState()`（含未知状态默认 pending）；`buildGenerationsPayload(req)`（仅 text-only 路径）；`buildEditFormData(req)`（refs / editTarget / mask 各种组合）；路由判定测试（refs/editTarget/mask 任一非空 → /edits）；`parseOpenAIResponse()`（b64 解码）；`mapOpenAIError()`（moderation_blocked → SAFETY；invalid_size → ERROR；401 → throw）；`buildOpenAIBatchJsonl(tasks)`；5 个 batch 方法 mock 测试；batch validate：tasks 含 refs/editTarget/mask 任一 → throw |
+| `scripts/lib/http.test.ts` | 改造 | 新签名 `(url, body, headers)`；`httpPostMultipart` 新增；`httpGetText` 新增（验证 raw 文本不被 JSON.parse）；retry/proxy/curl 分支适配 headers map |
 | `scripts/lib/config.test.ts` | 改造 | provider="openai" 读 OPENAI_*；provider="google" 读 GOOGLE_/GEMINI_*（回归）；model 未指定时为空 |
 | `scripts/lib/args.test.ts` | 改造 | `--edit` / `--mask` 解析 |
 | `scripts/providers/google.test.ts` | 改造 | factory 接 `ProviderConfig`；headers 自管 `x-goog-api-key`；editTarget fallback 当 ref[0]；mask 非空 throw |
 | `scripts/providers/types.test.ts` | 改造 | finishReason 不再有 MAX_TOKENS；safetyInfo.category optional |
-| `scripts/commands/generate.test.ts` | 改造 | `validateProviderCapabilities()`；mask + 非 openai → throw；chain + 无 generateChained → throw；flags.mask / flags.edit 透传 |
-| `scripts/commands/batch.test.ts` | 改造 | OpenAI batch + editTarget → throw；payload 估算考虑 mask |
+| `scripts/commands/generate.test.ts` | 改造 | `validateProviderCapabilities()`；mask + 非 openai → throw；mask 没有 edit/ref → throw；chain + 无 generateChained → throw；flags.mask / flags.edit 透传；新增 `finishReason === "ERROR"` 分支输出 safetyInfo.reason 而非泛化提示 |
+| `scripts/commands/batch.test.ts` | 改造 | OpenAI batch + 任意 image 输入（refs / editTarget / mask / character）→ throw 且错误信息包含 character 提示；`writeResults` 处理 `finishReason === "ERROR"` |
 | `scripts/integration.test.ts` | 加路径 | mock OpenAI server（拦截 fetch）；generate text-to-image / edit with mask / batch submit-status-fetch 端到端 |
 
 ### Mock 策略
 
-- 不调真实 OpenAI API：openai.test.ts 通过依赖注入或 mock 覆盖 `httpPost`/`httpPostMultipart`/`httpGet`
+- 不调真实 OpenAI API：openai.test.ts 通过依赖注入或 mock 覆盖 `httpPost` / `httpPostMultipart` / `httpGet` / `httpGetText`
 - integration.test.ts 用 Bun mock API 拦截 fetch，模拟 OpenAI 响应（200 + b64 / 400 + moderation_blocked / 429 retry）
-- Files API + `/v1/batches` mock 完整生命周期：upload → create batch → poll → fetch output file
+- Files API + `/v1/batches` mock 完整生命周期：upload (httpPostMultipart) → create batch (httpPost) → poll (httpGet) → fetch output file content (**必须用 `httpGetText`**，断言不走 `httpGet`，否则 raw JSONL 会被 JSON.parse 失败转 502)
 
 ### 测试覆盖度门槛
 
@@ -411,7 +486,7 @@ provider.batchFetch(jobId) → openai.batchFetch:
 按依赖顺序，每步独立绿灯：
 
 ### Step 1 — HTTP 层 headers map 化（无功能改动，纯重构）
-- `lib/http.ts`：`httpPost/httpGet` 签名 `(url, body, apiKey) → (url, body, headers)`；新增 `httpPostMultipart`
+- `lib/http.ts`：`httpPost/httpGet` 签名 `(url, body, apiKey) → (url, body, headers)`；新增 `httpPostMultipart(url, formData, headers)`；新增 `httpGetText(url, headers): Promise<{status, text}>`
 - `lib/http.test.ts` 适配
 - `providers/google.ts`：调用方传 `googleHeaders(apiKey)`
 - `providers/google.test.ts` 适配
@@ -433,21 +508,22 @@ provider.batchFetch(jobId) → openai.batchFetch:
 - 验收：`--provider google` 默认行为不变；`--provider openai` 但无 openai.ts 时报"unknown provider"
 
 ### Step 4 — OpenAI provider 核心（generate + edit 路由）
-- `providers/openai.ts`：factory + `generate()`（路由 generations/edits）+ `mapToOpenAISize` + `mapOpenAIError`
-- `providers/openai.test.ts`：unit case
+- `providers/openai.ts`：factory + `generate()` + 路由判定（`refs.length > 0 || editTarget || mask` → /edits）+ `mapToOpenAISize` + `mapToOpenAIQuality` + `mapOpenAIError`
+- `providers/openai.test.ts`：unit case 含路由分支全覆盖（4 种组合：text-only / refs only / editTarget only / mask）
 - `main.ts` PROVIDERS 注册 openai
-- 验收：`--provider openai --prompt "..."` 能跑通（mock 环境下）
+- 验收：`--provider openai --prompt "..."` 走 /generations 能跑通；`--provider openai --ref a.png --prompt "..."` 走 /edits 能跑通；`--provider openai --edit b.png --mask m.png --prompt "..."` 走 /edits 能跑通（mock 环境下）
 
-### Step 5 — OpenAI batch（Files API + /v1/batches）
-- `providers/openai.ts`：增加 `batchCreate/Get/Fetch/List/Cancel`
-- `providers/openai.test.ts`：batch case
-- `commands/batch.ts`：增加 OpenAI batch + editTarget 校验
-- 验收：`--provider openai batch submit prompts.json` 能跑通
+### Step 5 — OpenAI batch（Files API + /v1/batches，text-only）
+- `providers/openai.ts`：增加 `batchCreate/Get/Fetch/List/Cancel`；增加 `mapOpenAIBatchState`；用 `httpGetText` 下载 output JSONL；request_counts → stats、output_file_id → responsesFile
+- `providers/openai.test.ts`：batch case 含 state 映射全覆盖（含未知状态 default 行为）；output_file_id download 用 mock httpGetText
+- `commands/batch.ts`：`validateBatchTasks` 新增"OpenAI provider + tasks 含任何 image 输入 → throw"；错误信息包含 character profile 提示
+- 验收：`--provider openai batch submit text-only-prompts.json` 能跑通；`--provider openai batch submit prompts-with-refs.json` 报错；`--provider openai --character p.yaml batch submit any.json` 报错
 
 ### Step 6 — 命令层 wiring + 能力校验
-- `commands/generate.ts`：flags.edit/mask 透传；增加 `validateProviderCapabilities()`
-- `commands/generate.test.ts` 补 case
-- 验收：mask + Google → 报错；chain + OpenAI → 报错
+- `commands/generate.ts`：flags.edit/mask 透传；增加 `validateProviderCapabilities()`；新增 `finishReason === "ERROR"` 分支输出 safetyInfo.reason
+- `commands/batch.ts`：`writeResults` 处理 `finishReason === "ERROR"`
+- `commands/generate.test.ts` / `commands/batch.test.ts` 补 case
+- 验收：mask + Google → 报错；chain + OpenAI → 报错；mask 无 ref/edit → 报错；OpenAI 返回 ERROR 时用户看到真实错误信息
 
 ### Step 7 — 文档
 - `SKILL.md`：双 provider 支持、`OPENAI_API_KEY` 配置、能力矩阵简表
@@ -464,13 +540,18 @@ provider.batchFetch(jobId) → openai.batchFetch:
 
 ## Risks & Known Limitations
 
-1. **OpenAI batch 不支持 edits 端点**：multipart endpoint 无法在 batch JSONL 里编码。`editTarget` 任务在 batch 路径必须 throw，不做降级。
-2. **OpenAI 4K / 任意尺寸能力被砍**：尺寸映射方案 A 选定后，OpenAI 只能输出 SIZE_TABLE 中的 7 × 2 = 14 种规格。用户拿不到 3840x2160。如未来需求出现，可加 `--size` 旁路（方案 B）。
-3. **真透明背景不支持**：gpt-image-2 不支持 `background=transparent`。需要时只能切 codex 内置 `image_gen` + chroma-key 流程，本设计不覆盖。
-4. **lib/http.ts 重构破坏面**：所有调用方（google.ts 现有所有方法）签名要同步改。Step 1 必须严格保持 Google 测试绿灯。
-5. **错误码列表不完备**：当前只列了 `moderation_blocked` / `content_policy_violation` 两个明确映射到 SAFETY 的 error.code。如有其他需要 SAFETY 语义的 code，运行后再补。
-6. **AuthStrategy 留白**：未来接第 3 个 provider 时，如果 header 拼接逻辑高度重复，应抽 AuthStrategy。本次不做。
-7. **`--mask` CLI flag 仅 generate 模式生效**：batch 模式下，每任务的 mask 应来自 prompts.json 的字段（本设计不扩 prompts.json schema 加 mask 字段），CLI 顶层的 `--mask` 在 batch 模式下被忽略。如未来要支持 batch + mask，需在 prompts.json 加 `mask` 字段并扩 batch.ts 解析逻辑。
+1. **OpenAI 4K / 任意尺寸能力被砍**：尺寸映射方案 A 选定后，OpenAI 只能输出 SIZE_TABLE 中的 7 × 2 = 14 种规格。用户拿不到 3840x2160。如未来需求出现，可加 `--size` 旁路（方案 B）。
+2. **真透明背景不支持**：gpt-image-2 不支持 `background=transparent`。需要时只能切 codex 内置 `image_gen` + chroma-key 流程，本设计不覆盖。
+3. **lib/http.ts 重构破坏面**：所有调用方（google.ts 现有所有方法）签名要同步改。Step 1 必须严格保持 Google 测试绿灯。
+4. **错误码列表不完备**：当前只列了 `moderation_blocked` / `content_policy_violation` 两个明确映射到 SAFETY 的 error.code。如有其他需要 SAFETY 语义的 code，运行后再补。
+5. **AuthStrategy 留白**：未来接第 3 个 provider 时，如果 header 拼接逻辑高度重复，应抽 AuthStrategy。本次不做。
+6. **`--mask` CLI flag 仅 generate 模式生效**：batch 模式下走 text-only 路径（见 Risks 第 8 条），不接受 mask；如未来扩展 image-conditioned batch，需同步扩 prompts.json schema。
+7. **OpenAI 服务端 batch 状态映射易飘**：OpenAI 状态机（validating/in_progress/finalizing/completed/cancelling/cancelled/failed/expired）若官方新增状态，未映射的会落入 default 分支。implementation 中默认值要选 `pending`（最保守），避免误触 `succeeded` 提前 fetch。
+8. **OpenAI batch 限定 text-only（YAGNI 选择）**：当前 spec 拒绝 batch 中任何 image 输入（refs / editTarget / mask / character profile）。OpenAI 的 `/v1/images/edits` 实际支持 JSON body + `file_id` 引用，可通过先调 `/v1/files`（purpose=`vision`）上传所有 task 涉及的图、再在 JSONL body 里替换 path 为 file_id 实现。本次不做，理由：
+   - 实现复杂度：去重上传、文件 ID 缓存、清理流程、错误处理
+   - 主要批量场景是 text-to-image（占 80%+ 用例）
+   - character profile 在 OpenAI batch 失效是一个明显的能力倒退，但属于"等真有用户反馈再做"的范畴
+   - 后续若要支持，添加 `openaiUploadVisionFile()` + 改 `buildOpenAIBatchJsonl` 即可，不破坏现有抽象
 
 ---
 
