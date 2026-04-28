@@ -172,6 +172,16 @@ async function batchSubmit(
   // Provider-specific compatibility check (e.g., OpenAI batch is text-only)
   validateBatchTasks(provider.name, tasks);
 
+  // Per-task capability check via the same validateRequest hook the realtime path uses
+  // (commands/generate.ts). Without this, async batch submissions bypass the new
+  // 4k/13-ar validation that providers enforce, and a 4k+google or 5:4+openai task only
+  // fails server-side or mid-JSONL parse rather than at submit-time.
+  if (provider.validateRequest) {
+    for (const task of tasks) {
+      provider.validateRequest(task);
+    }
+  }
+
   // Payload estimation guardrail (total: character refs + task refs + prompts per task)
   {
     const BASE64_OVERHEAD = 1.37;
