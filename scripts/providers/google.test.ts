@@ -834,3 +834,72 @@ describe("createGoogleProvider new factory signature", () => {
     expect(provider.name).toBe("google");
   });
 });
+
+describe("google validateRequest hook (Task 1.4)", () => {
+  const provider = createGoogleProvider({
+    apiKey: "k",
+    baseUrl: "https://x.test",
+    model: "gemini-3.1-flash-image-preview",
+  });
+
+  test("rejects resolution=4k", () => {
+    expect(() => provider.validateRequest!({
+      prompt: "x", model: "m", ar: "16:9",
+      quality: "2k", imageSize: "2K",
+      resolution: "4k", detail: "high",
+      refs: [],
+    })).toThrow(/4k/);
+  });
+
+  test("rejects unsupported ar 5:4", () => {
+    expect(() => provider.validateRequest!({
+      prompt: "x", model: "m", ar: "5:4",
+      quality: "2k", imageSize: "2K",
+      resolution: "2k", detail: "high",
+      refs: [],
+    })).toThrow(/5:4/);
+  });
+
+  test.each(["1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3"])(
+    "accepts ar %s",
+    (ar) => {
+      expect(() => provider.validateRequest!({
+        prompt: "x", model: "m", ar,
+        quality: "2k", imageSize: "2K",
+        resolution: "2k", detail: "high",
+        refs: [],
+      })).not.toThrow();
+    },
+  );
+});
+
+describe("google deriveGoogleImageSize via buildRealtimeRequestBody (Task 1.4)", () => {
+  test("resolution=1k → imageSize=1K", () => {
+    const body = buildRealtimeRequestBody({
+      prompt: "x", model: "m", ar: null,
+      quality: "normal", imageSize: "1K",
+      resolution: "1k", detail: "auto",
+      refs: [],
+    });
+    expect(body.generationConfig.imageConfig.imageSize).toBe("1K");
+  });
+
+  test("resolution=2k → imageSize=2K", () => {
+    const body = buildRealtimeRequestBody({
+      prompt: "x", model: "m", ar: null,
+      quality: "2k", imageSize: "2K",
+      resolution: "2k", detail: "high",
+      refs: [],
+    });
+    expect(body.generationConfig.imageConfig.imageSize).toBe("2K");
+  });
+
+  test("resolution=4k throws", () => {
+    expect(() => buildRealtimeRequestBody({
+      prompt: "x", model: "m", ar: null,
+      quality: "2k", imageSize: "2K",
+      resolution: "4k", detail: "high",
+      refs: [],
+    })).toThrow(/4k/);
+  });
+});
