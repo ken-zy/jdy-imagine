@@ -27,6 +27,14 @@ function deriveGoogleImageSize(req: GenerateRequest): "1K" | "2K" {
 }
 
 function googleValidateRequest(req: GenerateRequest): void {
+  // Mirror the runtime check that generateCore/generateChained/batchCreate already do via
+  // rejectMask(), so the command-layer preflight catches mask+google before any task runs.
+  // Without this, the realtime preflight loop in commands/generate.ts only fails on
+  // resolution/ar — mask still surfaces, but as "task 1 throws mid-loop" rather than the
+  // fail-fast contract the surrounding code advertises.
+  if (req.mask) {
+    throw new Error("Google provider does not support --mask. Mask is OpenAI-only.");
+  }
   if (req.resolution === "4k") {
     throw new Error("Google provider does not support resolution=4k.");
   }

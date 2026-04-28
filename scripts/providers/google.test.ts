@@ -843,11 +843,19 @@ describe("google validateRequest hook (Task 1.4)", () => {
     (ar) => {
       expect(() => provider.validateRequest!({
         prompt: "x", model: "m", ar,
-        resolution: "2k", detail: "high", detail: "high",
+        resolution: "2k", detail: "high",
         refs: [],
       })).not.toThrow();
     },
   );
+
+  test("rejects mask at preflight (mirrors rejectMask runtime check)", () => {
+    expect(() => provider.validateRequest!({
+      prompt: "x", model: "m", ar: "16:9",
+      resolution: "2k", detail: "high",
+      refs: [], mask: "/tmp/m.png",
+    })).toThrow(/mask.*OpenAI/i);
+  });
 });
 
 describe("google deriveGoogleImageSize via buildRealtimeRequestBody (Task 1.4)", () => {
