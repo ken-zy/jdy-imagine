@@ -43,3 +43,50 @@ describe("loadPrompts", () => {
     expect(tasks[0].prompt).toBe("A cat");
   });
 });
+
+import { validateProviderCapabilities } from "./generate";
+
+describe("validateProviderCapabilities", () => {
+  const fakeProvider = (name: string, hasChain = false) => ({
+    name,
+    defaultModel: "m",
+    generate: async () => ({ images: [], finishReason: "STOP" as const }),
+    generateChained: hasChain ? (async () => ({ images: [], finishReason: "STOP" as const })) : undefined,
+  });
+
+  test("mask + non-openai throws", () => {
+    expect(() => validateProviderCapabilities(fakeProvider("google") as any, {
+      mask: "/tmp/m.png", edit: "/tmp/e.png",
+    })).toThrow(/mask.*openai/i);
+  });
+
+  test("mask without edit/ref throws", () => {
+    expect(() => validateProviderCapabilities(fakeProvider("openai") as any, {
+      mask: "/tmp/m.png",
+    })).toThrow(/mask.*requires/i);
+  });
+
+  test("mask with edit OK for openai", () => {
+    expect(() => validateProviderCapabilities(fakeProvider("openai") as any, {
+      mask: "/tmp/m.png", edit: "/tmp/e.png",
+    })).not.toThrow();
+  });
+
+  test("mask with ref OK for openai", () => {
+    expect(() => validateProviderCapabilities(fakeProvider("openai") as any, {
+      mask: "/tmp/m.png", ref: ["/tmp/r.png"],
+    })).not.toThrow();
+  });
+
+  test("chain on provider without generateChained throws", () => {
+    expect(() => validateProviderCapabilities(fakeProvider("openai", false) as any, {
+      chain: true,
+    })).toThrow(/chain/i);
+  });
+
+  test("chain on provider with generateChained OK", () => {
+    expect(() => validateProviderCapabilities(fakeProvider("google", true) as any, {
+      chain: true,
+    })).not.toThrow();
+  });
+});

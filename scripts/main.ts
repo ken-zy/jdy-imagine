@@ -1,11 +1,13 @@
 import { parseArgs } from "./lib/args";
 import { resolveConfig } from "./lib/config";
 import { createGoogleProvider } from "./providers/google";
+import { createOpenAIProvider } from "./providers/openai";
 import { runGenerate } from "./commands/generate";
-import type { Provider } from "./providers/types";
+import type { ProviderConfig, ProviderFactory } from "./providers/types";
 
-const PROVIDERS: Record<string, (apiKey: string, baseUrl: string) => Provider> = {
+const PROVIDERS: Record<string, ProviderFactory> = {
   google: createGoogleProvider,
+  openai: createOpenAIProvider,
 };
 
 async function main() {
@@ -19,8 +21,9 @@ async function main() {
 
   // Validate API key
   if (!config.apiKey) {
+    const envName = config.provider === "openai" ? "OPENAI_API_KEY" : "GOOGLE_API_KEY";
     console.error(
-      "Missing API key. Set GOOGLE_API_KEY or GEMINI_API_KEY environment variable,\n" +
+      `Missing API key. Set ${envName} environment variable,\n` +
       "or create a .env file at .jdy-imagine/.env or ~/.jdy-imagine/.env",
     );
     process.exit(1);
@@ -32,7 +35,18 @@ async function main() {
     console.error(`Unknown provider: ${config.provider}. Available: ${Object.keys(PROVIDERS).join(", ")}`);
     process.exit(1);
   }
-  const provider = providerFactory(config.apiKey, config.baseUrl);
+  const providerConfig: ProviderConfig = {
+    apiKey: config.apiKey,
+    baseUrl: config.baseUrl,
+    model: config.model,
+  };
+  const provider = providerFactory(providerConfig);
+
+  // Defensive fallback: if config.model is empty (no CLI/env/default), use provider.defaultModel.
+  // In normal flow mergeConfig fills this, but providers may declare richer defaults.
+  if (!config.model) {
+    config.model = provider.defaultModel;
+  }
 
   switch (args.command) {
     case "generate":
@@ -40,6 +54,8 @@ async function main() {
         prompt: args.flags.prompt,
         prompts: args.flags.prompts,
         ref: args.flags.ref,
+        edit: args.flags.edit,
+        mask: args.flags.mask,
         outdir: args.flags.outdir,
         json: args.flags.json,
         character: args.flags.character,

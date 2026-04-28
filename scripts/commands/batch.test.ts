@@ -113,3 +113,44 @@ describe("payload estimation", () => {
     expect(BATCH_PAYLOAD_LIMIT).toBeGreaterThan(20 * 1024 * 1024);
   });
 });
+
+import { validateBatchTasks } from "./batch";
+import type { GenerateRequest } from "../providers/types";
+
+describe("validateBatchTasks for OpenAI", () => {
+  test("text-only tasks pass", () => {
+    expect(() => validateBatchTasks("openai", [
+      { prompt: "x", model: "m", ar: null, quality: "normal", refs: [], imageSize: "1K" },
+    ])).not.toThrow();
+  });
+
+  test("tasks with refs throw", () => {
+    expect(() => validateBatchTasks("openai", [
+      { prompt: "x", model: "m", ar: null, quality: "normal", refs: ["/tmp/a.png"], imageSize: "1K" },
+    ])).toThrow(/text-only/i);
+  });
+
+  test("tasks with editTarget throw", () => {
+    expect(() => validateBatchTasks("openai", [
+      { prompt: "x", model: "m", ar: null, quality: "normal", refs: [], imageSize: "1K", editTarget: "/tmp/e.png" },
+    ])).toThrow(/text-only/i);
+  });
+
+  test("tasks with mask throw", () => {
+    expect(() => validateBatchTasks("openai", [
+      { prompt: "x", model: "m", ar: null, quality: "normal", refs: [], imageSize: "1K", mask: "/tmp/m.png" },
+    ])).toThrow(/text-only/i);
+  });
+
+  test("error message mentions character profile", () => {
+    expect(() => validateBatchTasks("openai", [
+      { prompt: "x", model: "m", ar: null, quality: "normal", refs: ["/tmp/a.png"], imageSize: "1K" },
+    ])).toThrow(/character/i);
+  });
+
+  test("google provider unaffected by validateBatchTasks", () => {
+    expect(() => validateBatchTasks("google", [
+      { prompt: "x", model: "m", ar: null, quality: "normal", refs: ["/tmp/a.png"], imageSize: "1K" },
+    ])).not.toThrow();
+  });
+});

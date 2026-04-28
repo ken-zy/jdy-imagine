@@ -30,6 +30,26 @@ export function validateGenerateArgs(flags: GenerateFlags): void {
   }
 }
 
+/**
+ * Provider-specific capability check, executed before any tasks run.
+ * Surfaces incompatible flag combinations as a single early error rather
+ * than letting them fail mid-loop with a confusing message.
+ */
+export function validateProviderCapabilities(
+  provider: Provider,
+  flags: { mask?: string; edit?: string; ref?: string[]; chain?: boolean },
+): void {
+  if (flags.mask && provider.name !== "openai") {
+    throw new Error(`--mask is supported only by openai provider (got: ${provider.name})`);
+  }
+  if (flags.mask && !flags.edit && (!flags.ref || flags.ref.length === 0)) {
+    throw new Error("--mask requires --edit or --ref to specify the image being masked");
+  }
+  if (flags.chain && !provider.generateChained) {
+    throw new Error(`Provider ${provider.name} does not support chain mode`);
+  }
+}
+
 interface PromptTask {
   prompt: string;
   ar?: string;
@@ -79,6 +99,8 @@ export async function runGenerate(
     prompt?: string;
     prompts?: string;
     ref?: string[];
+    edit?: string;
+    mask?: string;
     outdir: string;
     json: boolean;
     character?: string;
@@ -86,6 +108,7 @@ export async function runGenerate(
   },
 ): Promise<void> {
   validateGenerateArgs(flags);
+  validateProviderCapabilities(provider, flags);
   ensureOutdir(flags.outdir);
 
   // Load character profile if specified
@@ -136,6 +159,8 @@ export async function runGenerate(
       quality: task.quality ?? config.quality,
       refs: task.refs,
       imageSize: mapQualityToImageSize(task.quality ?? config.quality),
+      editTarget: flags.edit,
+      mask: flags.mask,
     };
 
     let result: GenerateResult;
@@ -199,7 +224,7 @@ export async function runGenerate(
     // Handle safety block (non-chain or first-task already handled above)
     if (result.finishReason === "SAFETY") {
       const msg = result.safetyInfo
-        ? `Safety block: ${result.safetyInfo.category} — ${result.safetyInfo.reason}`
+        ? `Safety block: ${result.safetyInfo.category ?? "unknown category"} — ${result.safetyInfo.reason}`
         : "Content blocked by safety filter";
       if (flags.json) {
         console.log(
@@ -214,6 +239,18 @@ export async function runGenerate(
       }
       if (!useChain) process.exit(1);
       continue; // In chain mode for non-first tasks, skip
+    }
+
+    // Handle ERROR finishReason (provider returned a non-safety failure as a result)
+    if (result.finishReason === "ERROR") {
+      const msg = result.safetyInfo?.reason ?? "Provider returned error";
+      if (flags.json) {
+        console.log(JSON.stringify({ error: msg, finishReason: "ERROR" }));
+      } else {
+        console.error(`Error: ${msg}`);
+      }
+      if (!useChain) process.exit(1);
+      continue;
     }
 
     // Handle no images

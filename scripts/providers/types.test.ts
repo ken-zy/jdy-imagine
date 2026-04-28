@@ -1,4 +1,5 @@
 import { describe, test, expect } from "bun:test";
+import { mapQualityToImageSize } from "./types";
 import type {
   GenerateRequest,
   GenerateResult,
@@ -6,8 +7,54 @@ import type {
   BatchJob,
   BatchResult,
   Provider,
+  ProviderConfig,
   ChainAnchor,
 } from "./types";
+
+describe("mapQualityToImageSize", () => {
+  test("normal -> 1K", () => expect(mapQualityToImageSize("normal")).toBe("1K"));
+  test("2k -> 2K", () => expect(mapQualityToImageSize("2k")).toBe("2K"));
+});
+
+describe("ProviderConfig type", () => {
+  test("requires apiKey, baseUrl, model", () => {
+    const cfg: ProviderConfig = { apiKey: "k", baseUrl: "https://x", model: "m" };
+    expect(cfg.apiKey).toBe("k");
+  });
+});
+
+describe("GenerateRequest mask/editTarget", () => {
+  test("accepts optional mask and editTarget", () => {
+    const req: GenerateRequest = {
+      prompt: "x",
+      model: "m",
+      ar: null,
+      quality: "normal",
+      refs: [],
+      imageSize: "1K",
+      mask: "/tmp/m.png",
+      editTarget: "/tmp/e.png",
+    };
+    expect(req.mask).toBe("/tmp/m.png");
+    expect(req.editTarget).toBe("/tmp/e.png");
+  });
+});
+
+describe("GenerateResult.finishReason ERROR", () => {
+  test("accepts ERROR", () => {
+    const r: GenerateResult = { images: [], finishReason: "ERROR" };
+    expect(r.finishReason).toBe("ERROR");
+  });
+
+  test("safetyInfo.category is optional (OpenAI omits it)", () => {
+    const r: GenerateResult = {
+      images: [],
+      finishReason: "SAFETY",
+      safetyInfo: { reason: "moderation_blocked" },
+    };
+    expect(r.safetyInfo?.category).toBeUndefined();
+  });
+});
 
 describe("Provider types", () => {
   test("GenerateRequest has required fields", () => {

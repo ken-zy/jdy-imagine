@@ -1,19 +1,57 @@
 # jdy-imagine
 
-AI image generation plugin for Claude Code. Google Gemini realtime + Batch API, character consistency, chain mode.
+AI image generation plugin for Claude Code. Supports both **Google Gemini** and **OpenAI gpt-image-2**. Realtime + Batch API, character consistency, chain mode (Gemini), edit with mask (OpenAI).
 
 ## Quick Start
 
 ```bash
-# Set API key
+# Google (default)
 export GOOGLE_API_KEY="your-key"
-
-# Text-to-image
 bun scripts/main.ts generate --prompt "A cat in watercolor style" --outdir ./images
 
-# Image-to-image (reference image)
+# OpenAI
+export OPENAI_API_KEY="sk-..."
+bun scripts/main.ts generate --provider openai --prompt "A cozy alpine cabin" --outdir ./images
+
+# Image-to-image (reference, both providers)
 bun scripts/main.ts generate --prompt "Make it blue" --ref source.png --outdir ./images
+
+# Edit with mask (OpenAI only)
+bun scripts/main.ts generate --provider openai \
+  --prompt "Replace background with sunset" \
+  --edit photo.png --mask mask.png --outdir ./images
 ```
+
+## Capability Matrix
+
+| Flag / Feature | Google | OpenAI | Notes |
+|---|---|---|---|
+| `--prompt` | yes | yes | |
+| `--ref <path>` | yes | yes | Google: inlineData; OpenAI: image[] in /edits |
+| `--edit <path>` | yes (fallback) | yes (native) | Google treats as ref[0]; OpenAI routes to /edits |
+| `--mask <path>` | throws | yes (needs --edit or --ref) | |
+| `--ar` | yes | yes | OpenAI uses fixed SIZE_TABLE mapping |
+| `--quality normal\|2k` | yes | yes | OpenAI: normal→medium, 2k→high |
+| `--chain` | yes | throws | OpenAI image API is stateless |
+| `--character` | yes | realtime only | Blocked in OpenAI batch (refs would be lost) |
+| `batch submit` | yes | text-only | OpenAI uses /v1/batches with 50% discount |
+| `batch submit --async` | yes | yes | |
+| Batch with refs/edit/mask/character | yes | throws | OpenAI batch is text-only by design (YAGNI) |
+| 4K / arbitrary size | no | not exposed | OpenAI 4K is server-supported but not in SIZE_TABLE |
+| Transparent background | no | no | gpt-image-2 doesn't support background=transparent |
+| HTTP proxy support | yes | text-only | OpenAI edit/batch use multipart upload which doesn't route through HTTPS_PROXY/HTTP_PROXY; commands fail fast with a clear error if proxy is set |
+
+## Environment Variables
+
+Google provider:
+- `GOOGLE_API_KEY` or `GEMINI_API_KEY` (required)
+- `GOOGLE_BASE_URL` (default: https://generativelanguage.googleapis.com)
+- `GOOGLE_IMAGE_MODEL` (default: gemini-3.1-flash-image-preview)
+
+OpenAI provider:
+- `OPENAI_API_KEY` (required)
+- `OPENAI_BASE_URL` (default: https://api.openai.com)
+- `OPENAI_IMAGE_MODEL` (default: gpt-image-2)
 
 ## Commands
 
