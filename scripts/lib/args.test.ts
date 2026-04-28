@@ -8,7 +8,8 @@ describe("parseArgs", () => {
       "--prompt", "A cat",
       "--outdir", "./images",
       "--ar", "16:9",
-      "--quality", "2k",
+      "--resolution", "2k",
+      "--detail", "high",
       "--model", "gemini-3-pro-image-preview",
       "--ref", "source.png",
     ]);
@@ -16,7 +17,8 @@ describe("parseArgs", () => {
     expect(result.flags.prompt).toBe("A cat");
     expect(result.flags.outdir).toBe("./images");
     expect(result.flags.ar).toBe("16:9");
-    expect(result.flags.quality).toBe("2k");
+    expect(result.flags.resolution).toBe("2k");
+    expect(result.flags.detail).toBe("high");
     expect(result.flags.model).toBe("gemini-3-pro-image-preview");
     expect(result.flags.ref).toEqual(["source.png"]);
   });
@@ -168,8 +170,7 @@ describe("args resolution/detail/ar (Task 1.2 additive)", () => {
     expect(() => parseArgs(["generate", "--prompt", "x", "--ar", "7:13"])).toThrow();
   });
 
-  test("legacy --quality flag still works (deprecated; throws in Task 1.6)", () => {
-    const a = parseArgs(["generate", "--prompt", "x", "--quality", "2k"]);
-    expect(a.flags.quality).toBe("2k");
+  test("--quality throws migration after Task 1.6", () => {
+    expect(() => parseArgs(["generate", "--prompt", "x", "--quality", "2k"])).toThrow(/quality.*removed/i);
   });
 });

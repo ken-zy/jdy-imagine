@@ -54,11 +54,8 @@ describe("validateProviderCapabilities", () => {
     generateChained: hasChain ? (async () => ({ images: [], finishReason: "STOP" as const })) : undefined,
   });
 
-  test("mask + non-openai throws", () => {
-    expect(() => validateProviderCapabilities(fakeProvider("google") as any, {
-      mask: "/tmp/m.png", edit: "/tmp/e.png",
-    })).toThrow(/mask.*openai/i);
-  });
+  // Old `provider.name === "openai"` guard removed in Task 1.6 — mask is a capability now.
+  // google still throws via its internal rejectMask; apimart accepts mask (Task 2.4).
 
   test("mask without edit/ref throws", () => {
     expect(() => validateProviderCapabilities(fakeProvider("openai") as any, {
@@ -74,6 +71,12 @@ describe("validateProviderCapabilities", () => {
 
   test("mask with ref OK for openai", () => {
     expect(() => validateProviderCapabilities(fakeProvider("openai") as any, {
+      mask: "/tmp/m.png", ref: ["/tmp/r.png"],
+    })).not.toThrow();
+  });
+
+  test("mask with ref OK for apimart (no command-layer block)", () => {
+    expect(() => validateProviderCapabilities(fakeProvider("apimart") as any, {
       mask: "/tmp/m.png", ref: ["/tmp/r.png"],
     })).not.toThrow();
   });

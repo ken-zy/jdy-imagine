@@ -65,7 +65,7 @@ bun scripts/main.ts generate [options]
 
 ```bash
 bun scripts/main.ts generate --prompt "A sunset over mountains" --outdir ./images
-bun scripts/main.ts generate --prompt "A landscape" --ar 16:9 --quality 2k --outdir ./images
+bun scripts/main.ts generate --prompt "A landscape" --ar 16:9 --resolution 2k --detail high --outdir ./images
 ```
 
 #### Multiple prompts (sequential)
@@ -200,7 +200,8 @@ bun scripts/main.ts batch cancel <jobId>
 | `--prompts` | | Path to prompts.json | |
 | `--model` | `-m` | Model ID | `gemini-3.1-flash-image-preview` |
 | `--ar` | | Aspect ratio | `1:1` |
-| `--quality` | | `normal` / `2k` | `2k` |
+| `--resolution` | | `1k` / `2k` / `4k` | `2k` |
+| `--detail` | | `auto` / `low` / `medium` / `high` | `high` |
 | `--ref` | | Reference image path(s), repeatable | |
 | `--character` | | Character profile JSON path | |
 | `--chain` | | Enable star-anchored chain mode (realtime only) | `false` |
@@ -265,6 +266,55 @@ Examples:
 - `002-一只可爱的猫在花园里.png`
 
 Multiple images from one prompt get `-a`, `-b` suffixes. Collisions get `-2`, `-3` suffixes.
+
+## Migration: --quality → --resolution + --detail
+
+The single `--quality` flag has been split into two independent dimensions to match what providers actually expose:
+
+- `--resolution {1k,2k,4k}` — output pixel resolution (was the dimensional half of `--quality 2k`)
+- `--detail {auto,low,medium,high}` — quality/sharpness tier (was the OpenAI-mapped half of `--quality 2k`; Gemini ignores)
+
+CLI migration:
+
+| Old | New |
+|---|---|
+| `--quality normal` | `--resolution 1k --detail medium` |
+| `--quality 2k` | `--resolution 2k --detail high` |
+
+EXTEND.md migration:
+
+```yaml
+# Old
+default_quality: 2k
+# New
+default_resolution: 2k
+default_detail: high
+```
+
+prompts.json migration:
+
+```json
+// Old
+{ "prompt": "...", "quality": "2k" }
+// New
+{ "prompt": "...", "resolution": "2k", "detail": "high" }
+```
+
+Any leftover `quality` field (CLI flag / EXTEND.md `default_quality` / prompts.json) triggers a migration error pointing back to this section.
+
+### EXTEND.md `default_model` advisory
+
+`default_model` in `EXTEND.md` is **provider-agnostic** — it applies regardless of which `--provider` you pick at runtime. With multiple providers having non-overlapping model namespaces (`gemini-3.1-...` / `gpt-image-2` / `gpt-image-2-official`), shipping `default_model: gemini-3.1-flash-image-preview` would silently leak Gemini's model name into other providers. Therefore `EXTEND.md.example` no longer ships a `default_model:` line.
+
+Override patterns:
+
+| Goal | Mechanism |
+|---|---|
+| Permanent custom model for one provider | `<PROVIDER>_IMAGE_MODEL` env var |
+| One-off custom model | `--model <id>` CLI flag |
+| Cross-provider override (rare) | keep `default_model` in EXTEND.md (will apply to every `--provider`) |
+
+Priority order: `--model` > `EXTEND.md default_model` > `<PROVIDER>_IMAGE_MODEL` env > provider's built-in default.
 
 ## prompts.json Format
 

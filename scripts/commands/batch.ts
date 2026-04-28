@@ -1,10 +1,9 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
 import { join, resolve, dirname } from "path";
 import type { Provider, GenerateRequest, BatchResult } from "../providers/types";
-import type { Config } from "../lib/config";
+import { type Config, QUALITY_REMOVED_MSG } from "../lib/config";
 import type { ParsedArgs } from "../lib/args";
 import { generateSlug, ensureOutdir, writeImage, mimeToExt } from "../lib/output";
-import { mapQualityToImageSize } from "../providers/google";
 import { loadCharacter, applyCharacterPrompt, mergeCharacterRefs } from "../lib/character";
 
 export const BATCH_PAYLOAD_LIMIT = 100 * 1024 * 1024;
@@ -18,7 +17,8 @@ export interface BatchManifest {
     key: string;
     prompt: string;
     ar?: string;
-    quality?: string;
+    resolution?: "1k" | "2k" | "4k";
+    detail?: "auto" | "low" | "medium" | "high";
   }>;
 }
 
@@ -127,9 +127,18 @@ async function batchSubmit(
   const rawTasks = JSON.parse(content) as Array<{
     prompt: string;
     ar?: string;
-    quality?: "normal" | "2k";
+    quality?: string;
+    resolution?: "1k" | "2k" | "4k";
+    detail?: "auto" | "low" | "medium" | "high";
     ref?: string[];
   }>;
+
+  // Migrate: prompts.json `quality` field is removed.
+  for (const t of rawTasks) {
+    if ("quality" in t && t.quality !== undefined) {
+      throw new Error(QUALITY_REMOVED_MSG);
+    }
+  }
 
   const dir = dirname(filePath);
   const tasks: GenerateRequest[] = rawTasks.map((t) => {
@@ -142,13 +151,19 @@ async function batchSubmit(
       refs = mergeCharacterRefs(refs, character);
     }
 
+    const resolution = (t.resolution ?? config.resolution) as "1k" | "2k" | "4k";
+    const detail = (t.detail ?? config.detail) as "auto" | "low" | "medium" | "high";
+
     return {
       prompt,
       model: config.model,
       ar: t.ar ?? config.ar,
-      quality: t.quality ?? config.quality,
+      resolution,
+      detail,
+      // Legacy fields (filled from new; Task 1.7 removes them):
+      quality: resolution === "1k" ? "normal" : "2k",
+      imageSize: resolution === "1k" ? "1K" : resolution === "2k" ? "2K" : "4K",
       refs,
-      imageSize: mapQualityToImageSize(t.quality ?? config.quality),
     };
   });
 
@@ -196,7 +211,8 @@ async function batchSubmit(
       key: `${seq}-${slug}`,
       prompt: t.prompt,
       ar: t.ar ?? undefined,
-      quality: t.quality,
+      resolution: t.resolution,
+      detail: t.detail,
     };
   });
 

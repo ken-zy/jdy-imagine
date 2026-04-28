@@ -27,18 +27,26 @@ describe("Integration: CLI -> provider -> output pipeline", () => {
       "generate",
       "--prompt", "A sunset over mountains",
       "--ar", "16:9",
-      "--quality", "2k",
+      "--resolution", "2k",
+      "--detail", "high",
       "--outdir", tempDir,
     ]);
     expect(args.command).toBe("generate");
 
     // 2. Merge config
     const config = mergeConfig(
-      { model: args.flags.model, ar: args.flags.ar, quality: args.flags.quality },
+      {
+        model: args.flags.model,
+        ar: args.flags.ar,
+        resolution: args.flags.resolution,
+        detail: args.flags.detail,
+      },
       {},
       { GOOGLE_API_KEY: "test-key" },
     );
     expect(config.model).toBe("gemini-3.1-flash-image-preview");
+    expect(config.resolution).toBe("2k");
+    expect(config.detail).toBe("high");
 
     // 3. Build request
     const req = buildRealtimeRequestBody({
@@ -46,6 +54,8 @@ describe("Integration: CLI -> provider -> output pipeline", () => {
       model: config.model,
       ar: args.flags.ar ?? config.ar,
       quality: config.quality,
+      resolution: config.resolution,
+      detail: config.detail,
       refs: [],
       imageSize: "2K",
     });

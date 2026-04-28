@@ -96,10 +96,12 @@ export function parseArgs(argv: string[]): ParsedArgs {
         result.flags.ar = v;
         break;
       }
-      case "--quality":
-        // Legacy flag — kept through Task 1.5; will throw QUALITY_REMOVED_MSG in Task 1.6.
-        result.flags.quality = nextVal(arg);
-        break;
+      case "--quality": {
+        // Removed in Task 1.6. Throw with migration guidance.
+        // Lazy import to avoid circular dependency at module load time.
+        const { QUALITY_REMOVED_MSG } = require("./config") as { QUALITY_REMOVED_MSG: string };
+        throw new Error(QUALITY_REMOVED_MSG);
+      }
       case "--resolution": {
         const v = nextVal(arg);
         if (!ALLOWED_RESOLUTION.has(v)) {

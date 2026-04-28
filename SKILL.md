@@ -38,7 +38,8 @@ bun scripts/main.ts batch submit text-only-prompts.json --provider openai --outd
 - `--provider`: `google` (default) or `openai`
 - `--model`, `-m`: Model ID (provider default if not specified)
 - `--ar`: Aspect ratio (1:1, 16:9, 9:16, 4:3, 3:4, 3:2, 2:3)
-- `--quality`: normal / 2k (default: 2k)
+- `--resolution`: `1k` / `2k` / `4k` (default: `2k`; `4k` apimart-only when added)
+- `--detail`: `auto` / `low` / `medium` / `high` (default: `high`; OpenAI passes through, Gemini ignores)
 - `--ref`: Reference image path(s) — works in both providers
 - `--edit`: Edit target image path — Google: same as --ref; OpenAI: routes to /edits
 - `--mask`: Mask image path — OpenAI only, requires --edit or --ref
@@ -61,4 +62,4 @@ Or create `.jdy-imagine/.env`.
 | `--chain` | yes | not supported |
 | `--character` | yes | yes (realtime); blocked in OpenAI batch |
 | batch submit | yes | text-only (no refs/edit/mask/character) |
-| 4K / arbitrary size | no | not exposed (use --quality 2k) |
+| 4K / arbitrary size | no | not exposed (use --resolution 2k --detail high) |

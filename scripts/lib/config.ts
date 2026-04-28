@@ -82,6 +82,9 @@ export function mergeConfig(
   extendMd: Record<string, string>,
   env: Record<string, string | undefined>,
 ): Config {
+  if (extendMd.default_quality !== undefined) {
+    throw new Error(QUALITY_REMOVED_MSG);
+  }
   const provider =
     cliFlags.provider ??
     extendMd.default_provider ??
