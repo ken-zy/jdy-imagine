@@ -37,8 +37,8 @@ bun scripts/main.ts batch submit text-only-prompts.json --provider openai --outd
 ### Options
 - `--provider`: `google` (default) or `openai`
 - `--model`, `-m`: Model ID (provider default if not specified)
-- `--ar`: Aspect ratio (1:1, 16:9, 9:16, 4:3, 3:4, 3:2, 2:3)
-- `--resolution`: `1k` / `2k` / `4k` (default: `2k`; `4k` apimart-only when added)
+- `--ar`: Aspect ratio. CLI accepts 13 values: `1:1`, `16:9`, `9:16`, `4:3`, `3:4`, `3:2`, `2:3` (google + openai), plus `5:4`, `4:5`, `2:1`, `1:2`, `21:9`, `9:21` (apimart-only when added — google + openai reject these via validateRequest)
+- `--resolution`: `1k` / `2k` / `4k` (default: `2k`; `4k` apimart-only when added — google + openai reject)
 - `--detail`: `auto` / `low` / `medium` / `high` (default: `high`; OpenAI passes through, Gemini ignores)
 - `--ref`: Reference image path(s) — works in both providers
 - `--edit`: Edit target image path — Google: same as --ref; OpenAI: routes to /edits

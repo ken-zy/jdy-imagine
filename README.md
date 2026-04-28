@@ -30,8 +30,9 @@ bun scripts/main.ts generate --provider openai \
 | `--ref <path>` | yes | yes | Google: inlineData; OpenAI: image[] in /edits |
 | `--edit <path>` | yes (fallback) | yes (native) | Google treats as ref[0]; OpenAI routes to /edits |
 | `--mask <path>` | throws | yes (needs --edit or --ref) | |
-| `--ar` | yes | yes | OpenAI uses fixed SIZE_TABLE mapping |
-| `--quality normal\|2k` | yes | yes | OpenAI: normal→medium, 2k→high |
+| `--ar` | yes (7) | yes (7) | OpenAI uses fixed SIZE_TABLE mapping. CLI accepts 13 values; google/openai reject the 6 extras (5:4, 4:5, 2:1, 1:2, 21:9, 9:21) — apimart-only |
+| `--resolution 1k\|2k\|4k` | yes (1k, 2k) | yes (1k, 2k) | google/openai reject `4k` — apimart-only |
+| `--detail auto\|low\|medium\|high` | ignored | passed through | gpt-image-2 maps to native `quality` field |
 | `--chain` | yes | throws | OpenAI image API is stateless |
 | `--character` | yes | realtime only | Blocked in OpenAI batch (refs would be lost) |
 | `batch submit` | yes | text-only | OpenAI uses /v1/batches with 50% discount |
@@ -79,12 +80,12 @@ bun scripts/main.ts generate --prompts prompts.json --outdir ./images
 ```json
 [
   { "prompt": "A sunset over mountains", "ar": "16:9" },
-  { "prompt": "A cat portrait", "quality": "2k" },
+  { "prompt": "A cat portrait", "resolution": "2k", "detail": "high" },
   { "prompt": "Edit this photo", "ref": ["base.png"] }
 ]
 ```
 
-Per-task fields override global CLI flags. Paths in `ref` resolve relative to the JSON file's directory.
+Per-task fields override global CLI flags. Paths in `ref` resolve relative to the JSON file's directory. The legacy `quality` field is rejected — see [Migration](#migration---quality---resolution--detail).
 
 #### Character profile
 
@@ -247,11 +248,13 @@ Override defaults via YAML front matter (searched in order):
 ```yaml
 ---
 default_provider: google
-default_model: gemini-3.1-flash-image-preview
-default_quality: 2k
+default_resolution: 2k
+default_detail: high
 default_ar: "1:1"
 ---
 ```
+
+(`default_model` is intentionally omitted; see the [advisory](#extendmd-default_model-advisory) below.)
 
 ### Priority
 
@@ -321,9 +324,11 @@ Priority order: `--model` > `EXTEND.md default_model` > `<PROVIDER>_IMAGE_MODEL`
 ```json
 [
   { "prompt": "A sunset over mountains", "ar": "16:9" },
-  { "prompt": "A cat portrait", "quality": "2k" },
+  { "prompt": "A cat portrait", "resolution": "2k", "detail": "high" },
   { "prompt": "Edit this", "ref": ["base.png", "overlay.png"] }
 ]
 ```
+
+Per-task fields: `prompt` (required), `ar`, `resolution`, `detail`, `ref`. All non-prompt fields are validated against the same allowlists `--ar` / `--resolution` / `--detail` enforce. Legacy `quality` field is rejected with migration guidance.
 
 All fields except `prompt` are optional and override global CLI flags.
