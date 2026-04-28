@@ -108,6 +108,31 @@ describe("mergeConfig resolution/detail (Task 1.3 additive)", () => {
 
 });
 
+describe("mergeConfig EXTEND.md runtime validation (no type-cast lies)", () => {
+  test("invalid default_resolution throws with allowlist hint", () => {
+    expect(() =>
+      mergeConfig({}, { default_resolution: "3k" }, {}),
+    ).toThrow(/Invalid EXTEND\.md default_resolution: 3k.*1k\|2k\|4k/);
+  });
+
+  test("invalid default_detail throws with allowlist hint", () => {
+    expect(() =>
+      mergeConfig({}, { default_detail: "ultra" }, {}),
+    ).toThrow(/Invalid EXTEND\.md default_detail: ultra.*auto\|low\|medium\|high/);
+  });
+
+  test("invalid default_ar throws with allowlist hint", () => {
+    expect(() =>
+      mergeConfig({}, { default_ar: "7:13" }, {}),
+    ).toThrow(/Invalid EXTEND\.md default_ar: 7:13/);
+  });
+
+  test("13-value ar is accepted via EXTEND.md", () => {
+    const c = mergeConfig({}, { default_ar: "21:9" }, {});
+    expect(c.ar).toBe("21:9");
+  });
+});
+
 describe("mergeConfig apimart provider", () => {
   test("provider=apimart picks APIMART_* env", () => {
     const c = mergeConfig(

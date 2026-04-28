@@ -2,6 +2,7 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
 import { join, resolve, dirname } from "path";
 import type { Provider, GenerateRequest, BatchResult } from "../providers/types";
 import { type Config, QUALITY_REMOVED_MSG } from "../lib/config";
+import { assertAr, assertResolution, assertDetail, type Resolution, type Detail } from "../lib/validators";
 import type { ParsedArgs } from "../lib/args";
 import { generateSlug, ensureOutdir, writeImage, mimeToExt } from "../lib/output";
 import { loadCharacter, applyCharacterPrompt, mergeCharacterRefs } from "../lib/character";
@@ -17,8 +18,8 @@ export interface BatchManifest {
     key: string;
     prompt: string;
     ar?: string;
-    resolution?: "1k" | "2k" | "4k";
-    detail?: "auto" | "low" | "medium" | "high";
+    resolution?: Resolution;
+    detail?: Detail;
   }>;
 }
 
@@ -128,8 +129,8 @@ async function batchSubmit(
     prompt: string;
     ar?: string;
     quality?: string;
-    resolution?: "1k" | "2k" | "4k";
-    detail?: "auto" | "low" | "medium" | "high";
+    resolution?: string;
+    detail?: string;
     ref?: string[];
   }>;
 
@@ -139,6 +140,13 @@ async function batchSubmit(
       throw new Error(QUALITY_REMOVED_MSG);
     }
   }
+
+  // Validate per-task overrides at the JSON boundary — same allowlist that CLI/EXTEND.md use.
+  rawTasks.forEach((t, idx) => {
+    if (t.ar !== undefined) assertAr(t.ar, `prompts.json[${idx}].ar`);
+    if (t.resolution !== undefined) assertResolution(t.resolution, `prompts.json[${idx}].resolution`);
+    if (t.detail !== undefined) assertDetail(t.detail, `prompts.json[${idx}].detail`);
+  });
 
   const dir = dirname(filePath);
   const tasks: GenerateRequest[] = rawTasks.map((t) => {
@@ -151,15 +159,12 @@ async function batchSubmit(
       refs = mergeCharacterRefs(refs, character);
     }
 
-    const resolution = (t.resolution ?? config.resolution) as "1k" | "2k" | "4k";
-    const detail = (t.detail ?? config.detail) as "auto" | "low" | "medium" | "high";
-
     return {
       prompt,
       model: config.model,
       ar: t.ar ?? config.ar,
-      resolution,
-      detail,
+      resolution: (t.resolution as Resolution | undefined) ?? config.resolution,
+      detail: (t.detail as Detail | undefined) ?? config.detail,
       refs,
     };
   });

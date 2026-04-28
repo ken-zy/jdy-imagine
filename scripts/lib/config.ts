@@ -1,11 +1,12 @@
 import { existsSync, readFileSync } from "fs";
 import { join } from "path";
+import { assertAr, assertResolution, assertDetail, type Resolution, type Detail } from "./validators";
 
 export interface Config {
   provider: string;
   model: string;
-  resolution: "1k" | "2k" | "4k";
-  detail: "auto" | "low" | "medium" | "high";
+  resolution: Resolution;
+  detail: Detail;
   ar: string;
   apiKey: string;
   baseUrl: string;
@@ -106,12 +107,36 @@ export function mergeConfig(
     envModel = env.APIMART_IMAGE_MODEL;
   }
 
-  const resolution = (cliFlags.resolution ??
-    extendMd.default_resolution ??
-    DEFAULTS.resolution) as "1k" | "2k" | "4k";
-  const detail = (cliFlags.detail ??
-    extendMd.default_detail ??
-    DEFAULTS.detail) as "auto" | "low" | "medium" | "high";
+  // Validate every untrusted entry point. CLI flags are pre-validated by parseArgs,
+  // but EXTEND.md front matter is not — and a silent type-cast lets garbage like
+  // `default_resolution: 3k` flow into Google's deriveImageSize as an undefined
+  // bucket that falls through to "2K", producing the wrong size with no warning.
+  let resolutionRaw: string = DEFAULTS.resolution;
+  if (cliFlags.resolution !== undefined) {
+    resolutionRaw = cliFlags.resolution;
+  } else if (extendMd.default_resolution !== undefined) {
+    assertResolution(extendMd.default_resolution, "EXTEND.md default_resolution");
+    resolutionRaw = extendMd.default_resolution;
+  }
+  assertResolution(resolutionRaw, "resolution");
+
+  let detailRaw: string = DEFAULTS.detail;
+  if (cliFlags.detail !== undefined) {
+    detailRaw = cliFlags.detail;
+  } else if (extendMd.default_detail !== undefined) {
+    assertDetail(extendMd.default_detail, "EXTEND.md default_detail");
+    detailRaw = extendMd.default_detail;
+  }
+  assertDetail(detailRaw, "detail");
+
+  let arRaw: string = DEFAULTS.ar;
+  if (cliFlags.ar !== undefined) {
+    arRaw = cliFlags.ar;
+  } else if (extendMd.default_ar !== undefined) {
+    assertAr(extendMd.default_ar, "EXTEND.md default_ar");
+    arRaw = extendMd.default_ar;
+  }
+  assertAr(arRaw, "ar");
 
   return {
     provider,
@@ -120,12 +145,9 @@ export function mergeConfig(
       extendMd.default_model ??
       envModel ??
       providerDefault.defaultModel,
-    resolution,
-    detail,
-    ar:
-      cliFlags.ar ??
-      extendMd.default_ar ??
-      DEFAULTS.ar,
+    resolution: resolutionRaw,
+    detail: detailRaw,
+    ar: arRaw,
     apiKey,
     baseUrl,
   };

@@ -23,12 +23,7 @@ export interface ParsedArgs {
   };
 }
 
-const ALLOWED_AR = new Set([
-  "1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3",
-  "5:4", "4:5", "2:1", "1:2", "21:9", "9:21",
-]);
-const ALLOWED_RESOLUTION = new Set(["1k", "2k", "4k"]);
-const ALLOWED_DETAIL = new Set(["auto", "low", "medium", "high"]);
+import { assertAr, assertResolution, assertDetail } from "./validators";
 
 export function parseArgs(argv: string[]): ParsedArgs {
   const result: ParsedArgs = {
@@ -88,9 +83,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
         break;
       case "--ar": {
         const v = nextVal(arg);
-        if (!ALLOWED_AR.has(v)) {
-          throw new Error(`Invalid --ar: ${v}. Must be one of: ${[...ALLOWED_AR].join(", ")}`);
-        }
+        assertAr(v, "--ar");
         result.flags.ar = v;
         break;
       }
@@ -102,17 +95,13 @@ export function parseArgs(argv: string[]): ParsedArgs {
       }
       case "--resolution": {
         const v = nextVal(arg);
-        if (!ALLOWED_RESOLUTION.has(v)) {
-          throw new Error(`Invalid --resolution: ${v}. Must be 1k|2k|4k.`);
-        }
+        assertResolution(v, "--resolution");
         result.flags.resolution = v;
         break;
       }
       case "--detail": {
         const v = nextVal(arg);
-        if (!ALLOWED_DETAIL.has(v)) {
-          throw new Error(`Invalid --detail: ${v}. Must be auto|low|medium|high.`);
-        }
+        assertDetail(v, "--detail");
         result.flags.detail = v;
         break;
       }

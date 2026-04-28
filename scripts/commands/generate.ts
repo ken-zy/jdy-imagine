@@ -10,6 +10,7 @@ import {
   mimeToExt,
 } from "../lib/output";
 import { type Config, QUALITY_REMOVED_MSG } from "../lib/config";
+import { assertAr, assertResolution, assertDetail, type Resolution, type Detail } from "../lib/validators";
 import { loadCharacter, applyCharacterPrompt, mergeCharacterRefs, type CharacterProfile } from "../lib/character";
 
 export interface GenerateFlags {
@@ -51,8 +52,8 @@ export function validateProviderCapabilities(
 interface PromptTask {
   prompt: string;
   ar?: string;
-  resolution?: "1k" | "2k" | "4k";
-  detail?: "auto" | "low" | "medium" | "high";
+  resolution?: Resolution;
+  detail?: Detail;
   refs: string[];
 }
 
@@ -61,8 +62,8 @@ export function loadPrompts(
   defaults: {
     model: string;
     ar: string;
-    resolution: "1k" | "2k" | "4k";
-    detail: "auto" | "low" | "medium" | "high";
+    resolution: Resolution;
+    detail: Detail;
     refs: string[];
   },
 ): PromptTask[] {
@@ -84,8 +85,8 @@ export function loadPrompts(
     prompt: string;
     ar?: string;
     quality?: string;
-    resolution?: "1k" | "2k" | "4k";
-    detail?: "auto" | "low" | "medium" | "high";
+    resolution?: string;
+    detail?: string;
     ref?: string[];
   }>;
 
@@ -97,13 +98,18 @@ export function loadPrompts(
   }
 
   const dir = dirname(filePath);
-  return tasks.map((t) => ({
-    prompt: t.prompt,
-    ar: t.ar ?? defaults.ar,
-    resolution: t.resolution ?? defaults.resolution,
-    detail: t.detail ?? defaults.detail,
-    refs: t.ref?.map((r) => resolve(dir, r)) ?? defaults.refs,
-  }));
+  return tasks.map((t, idx) => {
+    if (t.ar !== undefined) assertAr(t.ar, `prompts.json[${idx}].ar`);
+    if (t.resolution !== undefined) assertResolution(t.resolution, `prompts.json[${idx}].resolution`);
+    if (t.detail !== undefined) assertDetail(t.detail, `prompts.json[${idx}].detail`);
+    return {
+      prompt: t.prompt,
+      ar: t.ar ?? defaults.ar,
+      resolution: (t.resolution as Resolution | undefined) ?? defaults.resolution,
+      detail: (t.detail as Detail | undefined) ?? defaults.detail,
+      refs: t.ref?.map((r) => resolve(dir, r)) ?? defaults.refs,
+    };
+  });
 }
 
 // No hidden contracts — generateAndAnchor is in the public Provider interface
@@ -161,20 +167,17 @@ export async function runGenerate(
   }
 
   // Build all GenerateRequests up front for fail-fast preflight (refs already merged).
-  const builtReqs: GenerateRequest[] = tasks.map((task) => {
-    const resolution = (task.resolution ?? config.resolution) as "1k" | "2k" | "4k";
-    const detail = (task.detail ?? config.detail) as "auto" | "low" | "medium" | "high";
-    return {
-      prompt: task.prompt,
-      model: config.model,
-      ar: task.ar ?? null,
-      resolution,
-      detail,
-      refs: task.refs,
-      editTarget: flags.edit,
-      mask: flags.mask,
-    };
-  });
+  // resolution/detail were already validated in loadPrompts → safe to read directly.
+  const builtReqs: GenerateRequest[] = tasks.map((task) => ({
+    prompt: task.prompt,
+    model: config.model,
+    ar: task.ar ?? null,
+    resolution: task.resolution ?? config.resolution,
+    detail: task.detail ?? config.detail,
+    refs: task.refs,
+    editTarget: flags.edit,
+    mask: flags.mask,
+  }));
 
   // Fail-fast preflight: 16-image cap on final merged refs, plus provider self-check.
   for (const req of builtReqs) {
