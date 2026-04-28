@@ -8,7 +8,12 @@ export interface ParsedArgs {
     model?: string;
     provider?: string;
     ar?: string;
+    /** @deprecated Removed in Task 1.6 cleanup. Use resolution + detail. */
     quality?: string;
+    /** Resolution tier. Replaces the dimensional half of legacy `--quality`. */
+    resolution?: string;
+    /** Detail tier. Replaces the OpenAI-mapped half of legacy `--quality`. */
+    detail?: string;
     ref?: string[];
     edit?: string;
     mask?: string;
@@ -19,6 +24,13 @@ export interface ParsedArgs {
     character?: string;
   };
 }
+
+const ALLOWED_AR = new Set([
+  "1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3",
+  "5:4", "4:5", "2:1", "1:2", "21:9", "9:21",
+]);
+const ALLOWED_RESOLUTION = new Set(["1k", "2k", "4k"]);
+const ALLOWED_DETAIL = new Set(["auto", "low", "medium", "high"]);
 
 export function parseArgs(argv: string[]): ParsedArgs {
   const result: ParsedArgs = {
@@ -76,12 +88,34 @@ export function parseArgs(argv: string[]): ParsedArgs {
       case "--provider":
         result.flags.provider = nextVal(arg);
         break;
-      case "--ar":
-        result.flags.ar = nextVal(arg);
+      case "--ar": {
+        const v = nextVal(arg);
+        if (!ALLOWED_AR.has(v)) {
+          throw new Error(`Invalid --ar: ${v}. Must be one of: ${[...ALLOWED_AR].join(", ")}`);
+        }
+        result.flags.ar = v;
         break;
+      }
       case "--quality":
+        // Legacy flag — kept through Task 1.5; will throw QUALITY_REMOVED_MSG in Task 1.6.
         result.flags.quality = nextVal(arg);
         break;
+      case "--resolution": {
+        const v = nextVal(arg);
+        if (!ALLOWED_RESOLUTION.has(v)) {
+          throw new Error(`Invalid --resolution: ${v}. Must be 1k|2k|4k.`);
+        }
+        result.flags.resolution = v;
+        break;
+      }
+      case "--detail": {
+        const v = nextVal(arg);
+        if (!ALLOWED_DETAIL.has(v)) {
+          throw new Error(`Invalid --detail: ${v}. Must be auto|low|medium|high.`);
+        }
+        result.flags.detail = v;
+        break;
+      }
       case "--ref":
         if (!result.flags.ref) result.flags.ref = [];
         result.flags.ref.push(nextVal(arg));

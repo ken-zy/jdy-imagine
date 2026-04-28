@@ -128,3 +128,48 @@ describe("parseArgs --edit / --mask", () => {
     expect(args.flags.edit).toBe("/tmp/e.png");
   });
 });
+
+describe("args resolution/detail/ar (Task 1.2 additive)", () => {
+  test("parses --resolution 4k --detail high", () => {
+    const a = parseArgs(["generate", "--prompt", "x", "--resolution", "4k", "--detail", "high"]);
+    expect(a.flags.resolution).toBe("4k");
+    expect(a.flags.detail).toBe("high");
+  });
+
+  test("parses --resolution 1k", () => {
+    const a = parseArgs(["generate", "--prompt", "x", "--resolution", "1k"]);
+    expect(a.flags.resolution).toBe("1k");
+  });
+
+  test("parses --detail auto/low/medium/high", () => {
+    for (const d of ["auto", "low", "medium", "high"]) {
+      const a = parseArgs(["generate", "--prompt", "x", "--detail", d]);
+      expect(a.flags.detail).toBe(d);
+    }
+  });
+
+  test("rejects invalid --resolution", () => {
+    expect(() => parseArgs(["generate", "--prompt", "x", "--resolution", "8k"])).toThrow();
+  });
+
+  test("rejects invalid --detail", () => {
+    expect(() => parseArgs(["generate", "--prompt", "x", "--detail", "ultra"])).toThrow();
+  });
+
+  test("accepts all 13 ar values", () => {
+    const ars = ["1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3", "5:4", "4:5", "2:1", "1:2", "21:9", "9:21"];
+    for (const ar of ars) {
+      const a = parseArgs(["generate", "--prompt", "x", "--ar", ar]);
+      expect(a.flags.ar).toBe(ar);
+    }
+  });
+
+  test("rejects invalid --ar", () => {
+    expect(() => parseArgs(["generate", "--prompt", "x", "--ar", "7:13"])).toThrow();
+  });
+
+  test("legacy --quality flag still works (deprecated; throws in Task 1.6)", () => {
+    const a = parseArgs(["generate", "--prompt", "x", "--quality", "2k"]);
+    expect(a.flags.quality).toBe("2k");
+  });
+});
