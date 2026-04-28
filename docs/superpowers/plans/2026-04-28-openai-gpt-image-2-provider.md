@@ -632,9 +632,17 @@ git commit -m "refactor(types): add ProviderConfig, mask/editTarget, relocate ma
 - Modify: `scripts/commands/generate.ts`
 - Modify: `scripts/commands/batch.ts`
 
-- [ ] **Step 1: Remove `mapQualityToImageSize` from `scripts/providers/google.ts`**
+- [ ] **Step 1: Remove `mapQualityToImageSize` from `scripts/providers/google.ts` and re-export from types**
 
-Delete the `mapQualityToImageSize` function (it's now in `types.ts`).
+Delete the `mapQualityToImageSize` function definition from `scripts/providers/google.ts` (it's now in `types.ts`).
+
+To avoid breaking external imports, add a re-export at the top of `scripts/providers/google.ts`:
+
+```ts
+export { mapQualityToImageSize } from "./types";
+```
+
+This keeps `google.test.ts:2` (`import { mapQualityToImageSize } from "./google"`) and any other consumers working without changing their import paths. Update happens later if desired, but not required for this refactor.
 
 - [ ] **Step 2: Update factory signature and add editTarget/mask handling**
 
@@ -882,13 +890,22 @@ describe("mergeConfig with openai provider", () => {
     expect(c.model).toBe("gpt-image-1.5");
   });
 
-  test("model is empty string when no override (provider.defaultModel will fill in main.ts)", () => {
+  test("model defaults to gpt-image-2 when no override for openai", () => {
     const c = mergeConfig(
       { provider: "openai" },
       {},
       { OPENAI_API_KEY: "k" },
     );
-    expect(c.model).toBe("");
+    expect(c.model).toBe("gpt-image-2");
+  });
+
+  test("google regression: model still defaults to gemini-3.1-flash-image-preview", () => {
+    const c = mergeConfig(
+      { provider: "google" },
+      {},
+      { GOOGLE_API_KEY: "k" },
+    );
+    expect(c.model).toBe("gemini-3.1-flash-image-preview");
   });
 
   test("google provider regression: still reads GOOGLE_API_KEY", () => {
@@ -910,7 +927,7 @@ Expected: FAIL
 
 - [ ] **Step 3: Update `scripts/lib/config.ts`**
 
-Replace `DEFAULTS` and `mergeConfig`:
+Replace `DEFAULTS` and `mergeConfig`. Per-provider defaults include both `baseUrl` AND `defaultModel` so `mergeConfig` returns a populated `model` for each provider (no empty-string fallback in `main.ts` needed; preserves existing `integration.test.ts` assertion that `mergeConfig` returns the Gemini default when no env override):
 
 ```ts
 const DEFAULTS = {
@@ -919,9 +936,15 @@ const DEFAULTS = {
   ar: "1:1",
 };
 
-const PROVIDER_DEFAULTS: Record<string, { baseUrl: string }> = {
-  google: { baseUrl: "https://generativelanguage.googleapis.com" },
-  openai: { baseUrl: "https://api.openai.com" },
+const PROVIDER_DEFAULTS: Record<string, { baseUrl: string; defaultModel: string }> = {
+  google: {
+    baseUrl: "https://generativelanguage.googleapis.com",
+    defaultModel: "gemini-3.1-flash-image-preview",
+  },
+  openai: {
+    baseUrl: "https://api.openai.com",
+    defaultModel: "gpt-image-2",
+  },
 };
 
 export function mergeConfig(
@@ -956,7 +979,7 @@ export function mergeConfig(
       cliFlags.model ??
       extendMd.default_model ??
       envModel ??
-      "",  // Empty: main.ts will use provider.defaultModel as fallback
+      providerDefault.defaultModel,
     quality: (cliFlags.quality ??
       extendMd.default_quality ??
       DEFAULTS.quality) as "normal" | "2k",
@@ -969,6 +992,8 @@ export function mergeConfig(
   };
 }
 ```
+
+**Note**: this means `main.ts` no longer needs the "if (!config.model) config.model = provider.defaultModel" fallback added in Task 2.2 Step 3 — `mergeConfig` already populates a sane default. Keep it as a defensive fallback (in case future providers have empty defaultModel) but it should be unreachable in normal flow.
 
 - [ ] **Step 4: Run tests, expect PASS**
 
@@ -1009,7 +1034,7 @@ git commit -m "feat(config): per-provider env selection (OPENAI_API_KEY/BASE_URL
 
 - [ ] **Step 1: Write failing tests for `mapToOpenAISize` (table-driven)**
 
-Create `scripts/providers/openai.test.ts`:
+Create `scripts/providers/openai.test.ts` (do NOT import `createOpenAIProvider` yet — it's added in Task 4.2; ESM static import would fail otherwise):
 
 ```ts
 import { describe, test, expect, mock } from "bun:test";
@@ -1022,7 +1047,6 @@ import {
   buildEditFormData,
   parseOpenAIResponse,
   buildOpenAIBatchJsonl,
-  createOpenAIProvider,
 } from "./openai";
 
 describe("mapToOpenAISize", () => {
@@ -1277,7 +1301,7 @@ export function buildOpenAIBatchJsonl(tasks: GenerateRequest[]): { data: Uint8Ar
 - [ ] **Step 4: Run tests, expect PASS for all helper tests**
 
 Run: `bun test scripts/providers/openai.test.ts`
-Expected: PASS — all helper tests pass; `createOpenAIProvider` test will fail (not yet exported)
+Expected: PASS — all helper tests pass
 
 - [ ] **Step 5: Commit**
 
@@ -1295,9 +1319,11 @@ git commit -m "feat(openai): add SIZE_TABLE, quality/state/error mappings, paylo
 
 - [ ] **Step 1: Write failing tests for routing logic**
 
-Append to `scripts/providers/openai.test.ts`:
+First add the import for `createOpenAIProvider` to the existing import block at the top of `scripts/providers/openai.test.ts`. Then append:
 
 ```ts
+import { createOpenAIProvider } from "./openai";  // moved here from Task 4.1's deferred import
+
 describe("createOpenAIProvider routing", () => {
   test("text-only -> /v1/images/generations (JSON POST)", async () => {
     const originalFetch = globalThis.fetch;
@@ -1517,8 +1543,10 @@ git commit -m "feat(openai): realtime generate with /generations and /edits rout
 ### Task 5.1 — Implement batch methods on OpenAI provider
 
 **Files:**
-- Modify: `scripts/providers/openai.ts`
-- Modify: `scripts/providers/openai.test.ts`
+- Modify: `scripts/lib/http.ts` (Step 3a — add `httpPostMultipartWithRetry` / `httpGetTextWithRetry`)
+- Modify: `scripts/lib/http.test.ts` (Step 3a — add retry wrapper tests)
+- Modify: `scripts/providers/openai.ts` (Step 3b — implement batch methods using retry wrappers)
+- Modify: `scripts/providers/openai.test.ts` (Steps 1, 3b — batch method tests)
 
 - [ ] **Step 1: Write failing tests for batch methods**
 
@@ -1632,6 +1660,68 @@ describe("createOpenAIProvider batch", () => {
     }
   });
 
+  test("batchFetch downloads BOTH output_file and error_file, merges by custom_id", async () => {
+    const successOutput = JSON.stringify({
+      custom_id: "001-cat",
+      response: { body: { data: [{ b64_json: Buffer.from("CAT").toString("base64") }] } },
+    }) + "\n";
+    const errorOutput = JSON.stringify({
+      custom_id: "002-dog",
+      error: { message: "moderation_blocked" },
+    }) + "\n";
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = mock(async (url: any) => {
+      const u = url.toString();
+      if (u.includes("/v1/batches/batch_mixed")) {
+        return new Response(JSON.stringify({
+          id: "batch_mixed", status: "completed",
+          output_file_id: "file_out", error_file_id: "file_err",
+          request_counts: { total: 2, completed: 1, failed: 1 },
+        }), { status: 200 });
+      }
+      if (u.includes("/v1/files/file_out/content")) return new Response(successOutput, { status: 200 });
+      if (u.includes("/v1/files/file_err/content")) return new Response(errorOutput, { status: 200 });
+      return new Response("nf", { status: 404 });
+    });
+    try {
+      const provider = createOpenAIProvider({ apiKey: "k", baseUrl: "https://api.openai.com", model: "gpt-image-2" });
+      const results = await provider.batchFetch!("batch_mixed");
+      expect(results.length).toBe(2);
+      expect(results.find(r => r.key === "001-cat")?.result?.images.length).toBe(1);
+      expect(results.find(r => r.key === "002-dog")?.error).toBe("moderation_blocked");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("batchFetch handles error-only batch (no output_file_id)", async () => {
+    const errorOutput = JSON.stringify({
+      custom_id: "001-x",
+      error: { message: "rate_limit" },
+    }) + "\n";
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = mock(async (url: any) => {
+      const u = url.toString();
+      if (u.includes("/v1/batches/")) {
+        return new Response(JSON.stringify({
+          id: "batch_err", status: "completed",
+          error_file_id: "file_err",
+          request_counts: { total: 1, completed: 0, failed: 1 },
+        }), { status: 200 });
+      }
+      if (u.includes("/v1/files/file_err/content")) return new Response(errorOutput, { status: 200 });
+      return new Response("nf", { status: 404 });
+    });
+    try {
+      const provider = createOpenAIProvider({ apiKey: "k", baseUrl: "https://api.openai.com", model: "gpt-image-2" });
+      const results = await provider.batchFetch!("batch_err");
+      expect(results.length).toBe(1);
+      expect(results[0].error).toBe("rate_limit");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   test("batchList returns mapped jobs", async () => {
     const originalFetch = globalThis.fetch;
     globalThis.fetch = mock(async () =>
@@ -1676,21 +1766,112 @@ describe("createOpenAIProvider batch", () => {
 Run: `bun test scripts/providers/openai.test.ts`
 Expected: FAIL — batch methods not implemented
 
-- [ ] **Step 3: Implement batch methods in `scripts/providers/openai.ts`**
+- [ ] **Step 3a: Add retry wrappers for multipart and text-get in `scripts/lib/http.ts`**
 
-Inside `createOpenAIProvider`, after `generate`, add:
+Append to `scripts/lib/http.ts`:
 
 ```ts
+export async function httpPostMultipartWithRetry(
+  url: string,
+  formData: FormData,
+  headers: Record<string, string>,
+): Promise<HttpResponse> {
+  for (let attempt = 0; attempt <= RETRY_DELAYS_HTTP.length; attempt++) {
+    const res = await httpPostMultipart(url, formData, headers);
+    if (!RETRYABLE_HTTP.has(res.status) || attempt === RETRY_DELAYS_HTTP.length) {
+      return res;
+    }
+    await Bun.sleep(RETRY_DELAYS_HTTP[attempt]);
+  }
+  throw new Error("Unreachable");
+}
+
+export async function httpGetTextWithRetry(
+  url: string,
+  headers: Record<string, string>,
+): Promise<HttpTextResponse> {
+  for (let attempt = 0; attempt <= RETRY_DELAYS_HTTP.length; attempt++) {
+    const res = await httpGetText(url, headers);
+    if (!RETRYABLE_HTTP.has(res.status) || attempt === RETRY_DELAYS_HTTP.length) {
+      return res;
+    }
+    await Bun.sleep(RETRY_DELAYS_HTTP[attempt]);
+  }
+  throw new Error("Unreachable");
+}
+```
+
+Add corresponding tests in `scripts/lib/http.test.ts`:
+
+```ts
+describe("retry wrappers", () => {
+  test("httpPostMultipartWithRetry retries on 503", async () => {
+    const originalFetch = globalThis.fetch;
+    let calls = 0;
+    globalThis.fetch = mock(async () => {
+      calls++;
+      // Mock returns JSON-shaped 503 (not raw text) so httpPostMultipart preserves the 503 status.
+      // Raw-text 503 responses get downgraded to 502 by the JSON.parse failure path,
+      // and 502 is not in RETRYABLE_HTTP, so retry would never trigger.
+      if (calls === 1) return new Response(JSON.stringify({ error: { message: "service unavailable" } }), { status: 503 });
+      return new Response(JSON.stringify({ id: "f" }), { status: 200 });
+    });
+    try {
+      const { httpPostMultipartWithRetry } = await import("./http");
+      const res = await httpPostMultipartWithRetry("https://x.test/files", new FormData(), {});
+      expect(res.status).toBe(200);
+      expect(calls).toBe(2);
+    } finally { globalThis.fetch = originalFetch; }
+  });
+
+  test("httpGetTextWithRetry retries on 429", async () => {
+    const originalFetch = globalThis.fetch;
+    let calls = 0;
+    globalThis.fetch = mock(async () => {
+      calls++;
+      // httpGetText preserves status (does not JSON.parse), so raw text 429 is fine here.
+      if (calls === 1) return new Response("rate limit", { status: 429 });
+      return new Response("file content", { status: 200 });
+    });
+    try {
+      const { httpGetTextWithRetry } = await import("./http");
+      const res = await httpGetTextWithRetry("https://x.test/file", {});
+      expect(res.status).toBe(200);
+      expect(res.text).toBe("file content");
+      expect(calls).toBe(2);
+    } finally { globalThis.fetch = originalFetch; }
+  });
+});
+```
+
+Run: `bun test scripts/lib/http.test.ts`
+Expected: PASS — retry wrappers work.
+
+- [ ] **Step 3b: Implement batch methods in `scripts/providers/openai.ts`**
+
+Inside `createOpenAIProvider`, after `generate`, add (note: use `httpPostMultipartWithRetry` and `httpGetTextWithRetry` for the file IO paths to match the resilience of other batch operations):
+
+```ts
+import { httpPostMultipartWithRetry, httpGetTextWithRetry } from "../lib/http";  // add to imports at top
+
 async function uploadBatchFile(jsonl: Uint8Array, displayName: string): Promise<string> {
   const fd = new FormData();
   fd.append("purpose", "batch");
   fd.append("file", new Blob([jsonl], { type: "application/jsonl" }), `${displayName}.jsonl`);
-  const res = await httpPostMultipart(`${baseUrl}/v1/files`, fd, headers);
+  const res = await httpPostMultipartWithRetry(`${baseUrl}/v1/files`, fd, headers);
   if (res.status !== 200) {
     const err = (res.data as any)?.error;
     throw new Error(`OpenAI Files upload failed (${res.status}): ${err?.message ?? "unknown"}`);
   }
   return (res.data as { id: string }).id;
+}
+
+async function downloadBatchFile(fileId: string): Promise<string> {
+  const res = await httpGetTextWithRetry(`${baseUrl}/v1/files/${fileId}/content`, headers);
+  if (res.status !== 200) {
+    throw new Error(`Failed to download file ${fileId}: ${res.text.slice(0, 200)}`);
+  }
+  return res.text;
 }
 
 return {
@@ -1736,7 +1917,11 @@ return {
       created_at?: number;
       request_counts?: { total?: number; completed?: number; failed?: number };
       output_file_id?: string;
+      error_file_id?: string;
     };
+    // OpenAI batch may produce output_file_id (successful results) AND/OR
+    // error_file_id (failed requests). Prefer output_file_id for the main
+    // responsesFile pointer; consumer code reads both via batchFetch.
     return {
       id: d.id,
       state: mapOpenAIBatchState(d.status),
@@ -1748,50 +1933,66 @@ return {
           failed: d.request_counts.failed ?? 0,
         }
         : undefined,
-      responsesFile: d.output_file_id,
+      responsesFile: d.output_file_id ?? d.error_file_id,
     };
   },
 
   async batchFetch(jobId: string): Promise<BatchResult[]> {
-    // 1. get batch metadata to find output_file_id
+    // 1. get batch metadata to find output_file_id and error_file_id
     const metaRes = await httpGetWithRetry(`${baseUrl}/v1/batches/${jobId}`, headers);
     if (metaRes.status !== 200) {
       const err = (metaRes.data as any)?.error;
       throw new Error(err?.message ?? `OpenAI HTTP ${metaRes.status}`);
     }
-    const meta = metaRes.data as { output_file_id?: string; status?: string };
-    if (!meta.output_file_id) {
-      throw new Error(`Batch job has no output_file_id (status=${meta.status})`);
+    const meta = metaRes.data as {
+      output_file_id?: string;
+      error_file_id?: string;
+      status?: string;
+      request_counts?: { total?: number };
+    };
+    if (!meta.output_file_id && !meta.error_file_id) {
+      throw new Error(`Batch job has neither output_file_id nor error_file_id (status=${meta.status})`);
     }
-    // 2. download file content as raw text (NOT JSON.parse)
-    const fileRes = await httpGetText(`${baseUrl}/v1/files/${meta.output_file_id}/content`, headers);
-    if (fileRes.status !== 200) {
-      throw new Error(`Failed to download batch output file: ${fileRes.text.slice(0, 200)}`);
+    // 2. download both files (if present) and merge by custom_id
+    const resultsByKey = new Map<string, BatchResult>();
+    const parseLines = (text: string) => {
+      for (const line of text.split("\n")) {
+        if (!line.trim()) continue;
+        let parsed: any;
+        try { parsed = JSON.parse(line); }
+        catch { continue; }
+        const key = parsed.custom_id ?? "unknown";
+        if (parsed.error) {
+          resultsByKey.set(key, { key, error: parsed.error.message ?? "Unknown error" });
+          continue;
+        }
+        const responseBody = parsed.response?.body;
+        if (responseBody?.error) {
+          resultsByKey.set(key, { key, error: responseBody.error.message ?? "Unknown error" });
+          continue;
+        }
+        if (responseBody?.data) {
+          resultsByKey.set(key, { key, result: parseOpenAIResponse(responseBody) });
+          continue;
+        }
+        resultsByKey.set(key, { key, error: "No response in result line" });
+      }
+    };
+    if (meta.output_file_id) {
+      parseLines(await downloadBatchFile(meta.output_file_id));
     }
-    // 3. parse line-by-line
-    const results: BatchResult[] = [];
-    for (const line of fileRes.text.split("\n")) {
-      if (!line.trim()) continue;
-      let parsed: any;
-      try { parsed = JSON.parse(line); }
-      catch { continue; }
-      const key = parsed.custom_id ?? "unknown";
-      if (parsed.error) {
-        results.push({ key, error: parsed.error.message ?? "Unknown error" });
-        continue;
-      }
-      const responseBody = parsed.response?.body;
-      if (responseBody?.error) {
-        results.push({ key, error: responseBody.error.message ?? "Unknown error" });
-        continue;
-      }
-      if (responseBody?.data) {
-        results.push({ key, result: parseOpenAIResponse(responseBody) });
-        continue;
-      }
-      results.push({ key, error: "No response in result line" });
+    if (meta.error_file_id) {
+      parseLines(await downloadBatchFile(meta.error_file_id));
     }
-    return results;
+    // 3. completeness check
+    const expected = meta.request_counts?.total;
+    if (expected != null && resultsByKey.size < expected) {
+      console.error(
+        `Warning: Expected ${expected} results, got ${resultsByKey.size}. ` +
+        `${expected - resultsByKey.size} result(s) may be missing.`,
+      );
+    }
+    return Array.from(resultsByKey.values());
   },
 
   async batchList(): Promise<BatchJob[]> {
@@ -1826,9 +2027,11 @@ Expected: PASS
 - [ ] **Step 5: Commit**
 
 ```bash
-git add scripts/providers/openai.ts scripts/providers/openai.test.ts
+git add scripts/lib/http.ts scripts/lib/http.test.ts scripts/providers/openai.ts scripts/providers/openai.test.ts
 git commit -m "feat(openai): server-side batch via /v1/files + /v1/batches (text-only)"
 ```
+
+The commit bundles the new retry wrappers (`httpPostMultipartWithRetry` / `httpGetTextWithRetry`) with the batch methods that consume them, since neither is useful without the other.
 
 ### Task 5.2 — Add `validateBatchTasks` for OpenAI text-only restriction
 
@@ -2121,8 +2324,10 @@ describe("runGenerate ERROR finishReason", () => {
     let exitCode = -1;
     (process.exit as any) = (code: number) => { exitCode = code; throw new Error("exit"); };
     try {
-      const tmp = "/tmp/jdy-runerr-test";
-      await Bun.write(`${tmp}/.keep`, "x");
+      const { mkdtempSync } = await import("fs");
+      const { tmpdir } = await import("os");
+      const { join } = await import("path");
+      const tmp = mkdtempSync(join(tmpdir(), "jdy-runerr-"));
       await runGenerate(fakeProvider as any, {
         provider: "openai", model: "gpt-image-2", quality: "normal", ar: "1:1",
         apiKey: "k", baseUrl: "https://x.test",
@@ -2349,8 +2554,10 @@ Append to `scripts/integration.test.ts`:
 ```ts
 describe("integration: OpenAI provider", () => {
   test("generate text-to-image end-to-end", async () => {
-    const tmpOut = `/tmp/jdy-int-openai-${Date.now()}`;
-    await Bun.write(`${tmpOut}/.keep`, "");
+    const { mkdtempSync } = await import("fs");
+    const { tmpdir } = await import("os");
+    const { join } = await import("path");
+    const tmpOut = mkdtempSync(join(tmpdir(), "jdy-int-openai-"));
     const originalFetch = globalThis.fetch;
     globalThis.fetch = mock(async (url: any) => {
       if (url.toString().includes("/v1/images/generations")) {
@@ -2383,10 +2590,12 @@ describe("integration: OpenAI provider", () => {
   });
 
   test("edit with mask end-to-end", async () => {
-    const tmpOut = `/tmp/jdy-int-openai-edit-${Date.now()}`;
-    await Bun.write(`${tmpOut}/.keep`, "");
-    const editFile = `/tmp/jdy-int-edit.png`;
-    const maskFile = `/tmp/jdy-int-mask.png`;
+    const { mkdtempSync } = await import("fs");
+    const { tmpdir } = await import("os");
+    const { join } = await import("path");
+    const tmpOut = mkdtempSync(join(tmpdir(), "jdy-int-openai-edit-"));
+    const editFile = join(tmpOut, "edit.png");
+    const maskFile = join(tmpOut, "mask.png");
     await Bun.write(editFile, new Uint8Array([0x89, 0x50, 0x4E, 0x47]));
     await Bun.write(maskFile, new Uint8Array([0x89, 0x50, 0x4E, 0x47]));
     const originalFetch = globalThis.fetch;
@@ -2415,8 +2624,11 @@ describe("integration: OpenAI provider", () => {
   });
 
   test("batch submit/status/fetch end-to-end", async () => {
-    const tmpOut = `/tmp/jdy-int-openai-batch-${Date.now()}`;
-    const promptsFile = `${tmpOut}/prompts.json`;
+    const { mkdtempSync } = await import("fs");
+    const { tmpdir } = await import("os");
+    const { join } = await import("path");
+    const tmpOut = mkdtempSync(join(tmpdir(), "jdy-int-openai-batch-"));
+    const promptsFile = join(tmpOut, "prompts.json");
     await Bun.write(promptsFile, JSON.stringify([
       { prompt: "cat" },
       { prompt: "dog" },
