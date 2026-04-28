@@ -445,3 +445,44 @@ describe("createOpenAIProvider batch", () => {
     expect(calledUrl).toContain("/v1/batches/batch_abc/cancel");
   });
 });
+
+describe("createOpenAIProvider proxy guard", () => {
+  test("edit path throws clear error when proxy detected", async () => {
+    const tmpEdit = "/tmp/jdy-openai-proxy-edit.png";
+    await Bun.write(tmpEdit, new Uint8Array([0x89, 0x50, 0x4E, 0x47]));
+    const orig = process.env.HTTPS_PROXY;
+    process.env.HTTPS_PROXY = "http://corp-proxy:8080";
+    try {
+      const provider = createOpenAIProvider({ apiKey: "k", baseUrl: "https://api.openai.com", model: "gpt-image-2" });
+      await expect(provider.generate({
+        prompt: "edit", model: "gpt-image-2", ar: "1:1", quality: "normal",
+        refs: [], imageSize: "1K", editTarget: tmpEdit,
+      })).rejects.toThrow(/multipart upload.*not supported through HTTP proxy/i);
+    } finally {
+      if (orig === undefined) delete process.env.HTTPS_PROXY;
+      else process.env.HTTPS_PROXY = orig;
+    }
+  });
+
+  test("batchCreate throws clear error when proxy detected", async () => {
+    const orig = process.env.HTTPS_PROXY;
+    process.env.HTTPS_PROXY = "http://corp-proxy:8080";
+    try {
+      const provider = createOpenAIProvider({ apiKey: "k", baseUrl: "https://api.openai.com", model: "gpt-image-2" });
+      await expect(provider.batchCreate!({
+        model: "gpt-image-2",
+        tasks: [
+          { prompt: "x", model: "m", ar: null, quality: "normal", refs: [], imageSize: "1K" },
+        ],
+      })).rejects.toThrow(/multipart upload.*not supported through HTTP proxy/i);
+    } finally {
+      if (orig === undefined) delete process.env.HTTPS_PROXY;
+      else process.env.HTTPS_PROXY = orig;
+    }
+  });
+
+  // Text-only path is verified NOT to call rejectMultipartUnderProxy by code
+  // inspection: the guard is only invoked inside the editTarget/refs/mask branch
+  // and inside batchCreate. The text-only generations branch in generateOnce
+  // does not reference it.
+});

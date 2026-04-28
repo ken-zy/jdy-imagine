@@ -9,6 +9,7 @@ import {
   httpGetWithRetry,
   httpPostMultipartWithRetry,
   httpGetTextWithRetry,
+  detectProxy,
 } from "../lib/http";
 import { generateSlug } from "../lib/output";
 import type {
@@ -207,6 +208,20 @@ function rejectImageInputsForBatch(tasks: GenerateRequest[]): void {
   }
 }
 
+// OpenAI's edit and batch endpoints both use multipart/form-data uploads, which
+// the current HTTP layer cannot route through an HTTP proxy. Surface this early
+// with a clear message instead of silently failing 4 times via the retry path.
+function rejectMultipartUnderProxy(operation: string): void {
+  const proxy = detectProxy(process.env as Record<string, string>);
+  if (proxy) {
+    throw new Error(
+      `OpenAI ${operation} uses multipart upload which is not supported through HTTP proxy ` +
+      `(detected: ${proxy}). Disable the proxy environment variable for this command, ` +
+      `or use --provider google for proxy-friendly workflows.`,
+    );
+  }
+}
+
 export function createOpenAIProvider(config: ProviderConfig): Provider {
   const { apiKey, baseUrl } = config;
   const headers = openaiHeaders(apiKey);
@@ -237,6 +252,7 @@ export function createOpenAIProvider(config: ProviderConfig): Provider {
 
   async function generateOnce(req: GenerateRequest): Promise<GenerateResult> {
     if (shouldRouteToEdits(req)) {
+      rejectMultipartUnderProxy("edit");
       const fd = buildEditFormData(req);
       const url = `${baseUrl}/v1/images/edits`;
       for (let attempt = 0; attempt <= RETRY_DELAYS.length; attempt++) {
@@ -292,6 +308,7 @@ export function createOpenAIProvider(config: ProviderConfig): Provider {
 
     async batchCreate(req: BatchCreateRequest): Promise<BatchJob> {
       rejectImageInputsForBatch(req.tasks);
+      rejectMultipartUnderProxy("batch file upload");
       const displayName = req.displayName ?? `jdy-imagine-${Date.now()}`;
       const { data: jsonl } = buildOpenAIBatchJsonl(req.tasks);
       const fileId = await uploadBatchFile(jsonl, displayName);

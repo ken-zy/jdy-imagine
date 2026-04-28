@@ -39,6 +39,7 @@ bun scripts/main.ts generate --provider openai \
 | Batch with refs/edit/mask/character | yes | throws | OpenAI batch is text-only by design (YAGNI) |
 | 4K / arbitrary size | no | not exposed | OpenAI 4K is server-supported but not in SIZE_TABLE |
 | Transparent background | no | no | gpt-image-2 doesn't support background=transparent |
+| HTTP proxy support | yes | text-only | OpenAI edit/batch use multipart upload which doesn't route through HTTPS_PROXY/HTTP_PROXY; commands fail fast with a clear error if proxy is set |
 
 ## Environment Variables
 
