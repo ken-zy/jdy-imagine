@@ -1,6 +1,6 @@
 # jdy-imagine
 
-AI image generation plugin for Claude Code. Supports both **Google Gemini** and **OpenAI gpt-image-2**. Realtime + Batch API, character consistency, chain mode (Gemini), edit with mask (OpenAI).
+AI image generation plugin for Claude Code. Supports **Google Gemini**, **OpenAI gpt-image-2**, and **apimart** (China gateway for gpt-image-2). Realtime + Batch API, character consistency, chain mode (Gemini), edit with mask (OpenAI/apimart), 4K + 13-value aspect ratios (apimart).
 
 ## Quick Start
 
@@ -24,23 +24,23 @@ bun scripts/main.ts generate --provider openai \
 
 ## Capability Matrix
 
-| Flag / Feature | Google | OpenAI | Notes |
-|---|---|---|---|
-| `--prompt` | yes | yes | |
-| `--ref <path>` | yes | yes | Google: inlineData; OpenAI: image[] in /edits |
-| `--edit <path>` | yes (fallback) | yes (native) | Google treats as ref[0]; OpenAI routes to /edits |
-| `--mask <path>` | throws | yes (needs --edit or --ref) | |
-| `--ar` | yes (7) | yes (7) | OpenAI uses fixed SIZE_TABLE mapping. CLI accepts 13 values; google/openai reject the 6 extras (5:4, 4:5, 2:1, 1:2, 21:9, 9:21) — apimart-only |
-| `--resolution 1k\|2k\|4k` | yes (1k, 2k) | yes (1k, 2k) | google/openai reject `4k` — apimart-only |
-| `--detail auto\|low\|medium\|high` | ignored | passed through | gpt-image-2 maps to native `quality` field |
-| `--chain` | yes | throws | OpenAI image API is stateless |
-| `--character` | yes | realtime only | Blocked in OpenAI batch (refs would be lost) |
-| `batch submit` | yes | text-only | OpenAI uses /v1/batches with 50% discount |
-| `batch submit --async` | yes | yes | |
-| Batch with refs/edit/mask/character | yes | throws | OpenAI batch is text-only by design (YAGNI) |
-| 4K / arbitrary size | no | not exposed | OpenAI 4K is server-supported but not in SIZE_TABLE |
-| Transparent background | no | no | gpt-image-2 doesn't support background=transparent |
-| HTTP proxy support | yes | text-only | OpenAI edit/batch use multipart upload which doesn't route through HTTPS_PROXY/HTTP_PROXY; commands fail fast with a clear error if proxy is set |
+| Flag / Feature | Google | OpenAI | apimart | Notes |
+|---|---|---|---|---|
+| `--prompt` | yes | yes | yes | |
+| `--ref <path>` | yes | yes | yes (auto-uploads to apimart) | Google: inlineData; OpenAI: image[] in /edits; apimart: uploads via `/v1/uploads/images` and submits the returned 72h URL |
+| `--edit <path>` | yes (fallback) | yes (native) | yes | Google treats as ref[0]; OpenAI routes to /edits; apimart sends as `image_urls[0]` |
+| `--mask <path>` | throws | yes (needs --edit or --ref) | yes | apimart accepts mask via the `mask_url` field |
+| `--ar` | yes (7) | yes (7) | yes (13) | google/openai accept 7 values; apimart accepts the 6 extras (5:4, 4:5, 2:1, 1:2, 21:9, 9:21) too |
+| `--resolution 1k\|2k\|4k` | 1k, 2k | 1k, 2k | 1k, 2k, 4k | apimart 4K is the only path; google/openai reject `4k` via validateRequest |
+| `--resolution 4k` ar restriction | n/a | n/a | 16:9, 9:16, 2:1, 1:2, 21:9, 9:21 only | apimart rejects 4k + the 7 standard ar values |
+| `--detail auto\|low\|medium\|high` | ignored | passed through | passed through (`quality` field) | gpt-image-2 native; Gemini ignores |
+| `--chain` | yes | throws | throws | apimart is stateless/async |
+| `--character` | yes | realtime only | yes (sha256 cache dedupes refs across prompts) | character refs uploaded once per unique hash |
+| `batch submit` | yes | text-only | throws | apimart submit/poll is already async — no batch discount, so `batch` subcommands all throw friendly does-not-support |
+| `batch submit --async` | yes | yes | n/a | use `--provider apimart` realtime instead |
+| Batch with refs/edit/mask/character | yes | throws | n/a | OpenAI batch is text-only by design (YAGNI) |
+| Transparent background | no | no | no | gpt-image-2 doesn't support background=transparent |
+| HTTP proxy support | yes | text-only | text-only (refs require disabling proxy) | apimart upload uses multipart, same constraint as OpenAI edit/batch — fail-fast with a clear error if proxy is set |
 
 ## Environment Variables
 
@@ -53,6 +53,11 @@ OpenAI provider:
 - `OPENAI_API_KEY` (required)
 - `OPENAI_BASE_URL` (default: https://api.openai.com)
 - `OPENAI_IMAGE_MODEL` (default: gpt-image-2)
+
+apimart provider (China gateway for gpt-image-2):
+- `APIMART_API_KEY` (required)
+- `APIMART_BASE_URL` (default: https://api.apimart.ai)
+- `APIMART_IMAGE_MODEL` (default: gpt-image-2-official)
 
 ## Commands
 
@@ -219,8 +224,63 @@ Aspect ratio options (CLI accepts 13 values): `1:1`, `16:9`, `9:16`, `4:3`, `3:4
 | `gemini-2.5-flash-image` | Yes | Yes | GA |
 | `gemini-3.1-flash-image-preview` | Yes | Yes | Default, preview |
 | `gemini-3-pro-image-preview` | Yes | Yes | Preview |
+| `gpt-image-2` (OpenAI direct) | Yes | Yes | text-only batch |
+| `gpt-image-2-official` (apimart) | Yes | No (apimart batch is rejected — submit/poll is already async) | China gateway, native 4K, 13-value ar |
 
 The `--model` flag accepts any model ID. The above are verified as of 2026-04-13.
+
+## apimart Provider (China gateway)
+
+apimart is a China-domestic gateway for OpenAI gpt-image-2 with native 4K, extended
+aspect ratios (13 values), and a fully async task model. Use it when you need 4K
+output, the apimart-only ar values (5:4, 4:5, 2:1, 1:2, 21:9, 9:21), or want to
+avoid the cross-border proxy hop required for direct OpenAI access from China.
+
+### Configuration
+
+```bash
+export APIMART_API_KEY="..."           # required
+# optional:
+export APIMART_BASE_URL="https://api.apimart.ai"
+export APIMART_IMAGE_MODEL="gpt-image-2-official"
+```
+
+### Usage
+
+```bash
+# Text-to-image
+bun scripts/main.ts generate --provider apimart --prompt "..." --resolution 2k --detail high
+
+# 4K (only with ar 16:9, 9:16, 2:1, 1:2, 21:9, 9:21)
+bun scripts/main.ts generate --provider apimart --prompt "..." --resolution 4k --ar 16:9
+
+# Image-to-image (refs auto-uploaded, return 72h URLs)
+bun scripts/main.ts generate --provider apimart --prompt "..." --ref a.png
+
+# Edit with mask
+bun scripts/main.ts generate --provider apimart --prompt "..." --edit photo.png --mask m.png
+
+# Apimart-only aspect ratios
+bun scripts/main.ts generate --provider apimart --prompt "..." --ar 21:9
+```
+
+### Notes
+
+- **Async polling**: image generation is async (submit → poll). Polling uses 12s
+  initial wait, 3s interval, 180s timeout. On timeout the error message includes
+  the `task_id` — check the apimart console manually if the task subsequently
+  completes; results are retrievable for 72h.
+- **Image upload URLs**: refs/edit/mask are uploaded to apimart's own
+  `/v1/uploads/images` and the returned URLs are valid for 72h. apimart manages
+  expiration; jdy-imagine does not need cleanup. URLs are reused across the
+  same run via a sha256-keyed cache, so the same content uploads exactly once
+  even when used by many prompts.
+- **HTTPS_PROXY**: apimart upload uses multipart and does NOT route through
+  HTTP proxy (same constraint as OpenAI direct). Disable proxy when using
+  `--provider apimart` with image inputs.
+- **No batch / no chain**: apimart does not implement batch (no cost benefit)
+  or chain (API is async/stateless). These commands throw with a friendly
+  message pointing to alternatives.
 
 ## Configuration
 
