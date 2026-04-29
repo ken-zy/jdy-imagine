@@ -1,5 +1,4 @@
 import { describe, test, expect } from "bun:test";
-import { mapQualityToImageSize } from "./types";
 import type {
   GenerateRequest,
   GenerateResult,
@@ -10,11 +9,6 @@ import type {
   ProviderConfig,
   ChainAnchor,
 } from "./types";
-
-describe("mapQualityToImageSize", () => {
-  test("normal -> 1K", () => expect(mapQualityToImageSize("normal")).toBe("1K"));
-  test("2k -> 2K", () => expect(mapQualityToImageSize("2k")).toBe("2K"));
-});
 
 describe("ProviderConfig type", () => {
   test("requires apiKey, baseUrl, model", () => {
@@ -29,9 +23,9 @@ describe("GenerateRequest mask/editTarget", () => {
       prompt: "x",
       model: "m",
       ar: null,
-      quality: "normal",
+      resolution: "1k",
+      detail: "medium",
       refs: [],
-      imageSize: "1K",
       mask: "/tmp/m.png",
       editTarget: "/tmp/e.png",
     };
@@ -62,9 +56,9 @@ describe("Provider types", () => {
       prompt: "A cat",
       model: "gemini-3.1-flash-image-preview",
       ar: "16:9",
-      quality: "2k",
+      resolution: "2k",
+      detail: "high",
       refs: [],
-      imageSize: "2K",
     };
     expect(req.prompt).toBe("A cat");
     expect(req.refs).toEqual([]);
@@ -159,5 +153,54 @@ describe("BatchJob type", () => {
       createTime: "2026-04-14T00:00:00Z",
     };
     expect(job.responsesFile).toBeUndefined();
+  });
+});
+
+describe("GenerateRequest resolution/detail enums", () => {
+  test("resolution accepts 1k/2k/4k", () => {
+    const reqs: GenerateRequest[] = (["1k", "2k", "4k"] as const).map((r) => ({
+      prompt: "x",
+      model: "m",
+      ar: null,
+      resolution: r,
+      detail: "auto",
+      refs: [],
+    }));
+    expect(reqs.map((r) => r.resolution)).toEqual(["1k", "2k", "4k"]);
+  });
+
+  test("detail accepts auto/low/medium/high", () => {
+    const reqs: GenerateRequest[] = (["auto", "low", "medium", "high"] as const).map((d) => ({
+      prompt: "x",
+      model: "m",
+      ar: null,
+      resolution: "1k",
+      detail: d,
+      refs: [],
+    }));
+    expect(reqs.map((r) => r.detail)).toEqual(["auto", "low", "medium", "high"]);
+  });
+});
+
+describe("Provider interface — validateRequest hook", () => {
+  test("optional validateRequest is acceptable on Provider", () => {
+    const p: Provider = {
+      name: "test",
+      defaultModel: "x",
+      generate: async () => ({ images: [], finishReason: "STOP" }),
+      validateRequest: (req) => {
+        void req;
+      },
+    };
+    expect(p.validateRequest).toBeDefined();
+  });
+
+  test("provider without validateRequest still satisfies Provider type", () => {
+    const p: Provider = {
+      name: "test",
+      defaultModel: "x",
+      generate: async () => ({ images: [], finishReason: "STOP" }),
+    };
+    expect(p.validateRequest).toBeUndefined();
   });
 });

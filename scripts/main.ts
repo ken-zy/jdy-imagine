@@ -16,7 +16,8 @@ async function main() {
     model: args.flags.model,
     provider: args.flags.provider,
     ar: args.flags.ar,
-    quality: args.flags.quality,
+    resolution: args.flags.resolution,
+    detail: args.flags.detail,
   });
 
   // Validate API key

@@ -1,10 +1,10 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
 import { join, resolve, dirname } from "path";
 import type { Provider, GenerateRequest, BatchResult } from "../providers/types";
-import type { Config } from "../lib/config";
+import { type Config, QUALITY_REMOVED_MSG } from "../lib/config";
+import { assertAr, assertResolution, assertDetail, type Resolution, type Detail } from "../lib/validators";
 import type { ParsedArgs } from "../lib/args";
 import { generateSlug, ensureOutdir, writeImage, mimeToExt } from "../lib/output";
-import { mapQualityToImageSize } from "../providers/google";
 import { loadCharacter, applyCharacterPrompt, mergeCharacterRefs } from "../lib/character";
 
 export const BATCH_PAYLOAD_LIMIT = 100 * 1024 * 1024;
@@ -18,7 +18,8 @@ export interface BatchManifest {
     key: string;
     prompt: string;
     ar?: string;
-    quality?: string;
+    resolution?: Resolution;
+    detail?: Detail;
   }>;
 }
 
@@ -127,9 +128,25 @@ async function batchSubmit(
   const rawTasks = JSON.parse(content) as Array<{
     prompt: string;
     ar?: string;
-    quality?: "normal" | "2k";
+    quality?: string;
+    resolution?: string;
+    detail?: string;
     ref?: string[];
   }>;
+
+  // Migrate: prompts.json `quality` field is removed.
+  for (const t of rawTasks) {
+    if ("quality" in t && t.quality !== undefined) {
+      throw new Error(QUALITY_REMOVED_MSG);
+    }
+  }
+
+  // Validate per-task overrides at the JSON boundary — same allowlist that CLI/EXTEND.md use.
+  rawTasks.forEach((t, idx) => {
+    if (t.ar !== undefined) assertAr(t.ar, `prompts.json[${idx}].ar`);
+    if (t.resolution !== undefined) assertResolution(t.resolution, `prompts.json[${idx}].resolution`);
+    if (t.detail !== undefined) assertDetail(t.detail, `prompts.json[${idx}].detail`);
+  });
 
   const dir = dirname(filePath);
   const tasks: GenerateRequest[] = rawTasks.map((t) => {
@@ -146,14 +163,24 @@ async function batchSubmit(
       prompt,
       model: config.model,
       ar: t.ar ?? config.ar,
-      quality: t.quality ?? config.quality,
+      resolution: (t.resolution as Resolution | undefined) ?? config.resolution,
+      detail: (t.detail as Detail | undefined) ?? config.detail,
       refs,
-      imageSize: mapQualityToImageSize(t.quality ?? config.quality),
     };
   });
 
   // Provider-specific compatibility check (e.g., OpenAI batch is text-only)
   validateBatchTasks(provider.name, tasks);
+
+  // Per-task capability check via the same validateRequest hook the realtime path uses
+  // (commands/generate.ts). Without this, async batch submissions bypass the new
+  // 4k/13-ar validation that providers enforce, and a 4k+google or 5:4+openai task only
+  // fails server-side or mid-JSONL parse rather than at submit-time.
+  if (provider.validateRequest) {
+    for (const task of tasks) {
+      provider.validateRequest(task);
+    }
+  }
 
   // Payload estimation guardrail (total: character refs + task refs + prompts per task)
   {
@@ -196,7 +223,8 @@ async function batchSubmit(
       key: `${seq}-${slug}`,
       prompt: t.prompt,
       ar: t.ar ?? undefined,
-      quality: t.quality,
+      resolution: t.resolution,
+      detail: t.detail,
     };
   });
 

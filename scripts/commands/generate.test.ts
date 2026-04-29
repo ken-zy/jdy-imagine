@@ -1,4 +1,7 @@
 import { describe, test, expect } from "bun:test";
+import { mkdtempSync, writeFileSync } from "fs";
+import { join } from "path";
+import { tmpdir } from "os";
 import { validateGenerateArgs, loadPrompts } from "./generate";
 
 describe("validateGenerateArgs", () => {
@@ -32,15 +35,52 @@ describe("chain mode edge cases", () => {
 });
 
 describe("loadPrompts", () => {
+  const defaults = {
+    model: "test",
+    ar: "1:1",
+    resolution: "2k" as const,
+    detail: "high" as const,
+    refs: [],
+  };
+
+  function writePrompts(content: unknown): string {
+    const dir = mkdtempSync(join(tmpdir(), "loadPrompts-"));
+    const path = join(dir, "prompts.json");
+    writeFileSync(path, JSON.stringify(content));
+    return path;
+  }
+
   test("single prompt creates one task", () => {
-    const tasks = loadPrompts({ prompt: "A cat" }, {
-      model: "test",
-      ar: "1:1",
-      quality: "2k" as const,
-      refs: [],
-    });
+    const tasks = loadPrompts({ prompt: "A cat" }, defaults);
     expect(tasks).toHaveLength(1);
     expect(tasks[0].prompt).toBe("A cat");
+  });
+
+  test("prompts.json invalid resolution throws", () => {
+    const path = writePrompts([{ prompt: "x", resolution: "3k" }]);
+    expect(() => loadPrompts({ prompts: path }, defaults)).toThrow(
+      /Invalid prompts\.json\[0\]\.resolution: 3k.*1k\|2k\|4k/,
+    );
+  });
+
+  test("prompts.json invalid detail throws", () => {
+    const path = writePrompts([{ prompt: "x", detail: "ultra" }]);
+    expect(() => loadPrompts({ prompts: path }, defaults)).toThrow(
+      /Invalid prompts\.json\[0\]\.detail: ultra.*auto\|low\|medium\|high/,
+    );
+  });
+
+  test("prompts.json invalid ar throws", () => {
+    const path = writePrompts([{ prompt: "x", ar: "7:13" }]);
+    expect(() => loadPrompts({ prompts: path }, defaults)).toThrow(
+      /Invalid prompts\.json\[0\]\.ar: 7:13/,
+    );
+  });
+
+  test("prompts.json valid 13-value ar accepted", () => {
+    const path = writePrompts([{ prompt: "x", ar: "21:9" }]);
+    const tasks = loadPrompts({ prompts: path }, defaults);
+    expect(tasks[0].ar).toBe("21:9");
   });
 });
 
@@ -54,11 +94,8 @@ describe("validateProviderCapabilities", () => {
     generateChained: hasChain ? (async () => ({ images: [], finishReason: "STOP" as const })) : undefined,
   });
 
-  test("mask + non-openai throws", () => {
-    expect(() => validateProviderCapabilities(fakeProvider("google") as any, {
-      mask: "/tmp/m.png", edit: "/tmp/e.png",
-    })).toThrow(/mask.*openai/i);
-  });
+  // Old `provider.name === "openai"` guard removed in Task 1.6 — mask is a capability now.
+  // google still throws via its internal rejectMask; apimart accepts mask (Task 2.4).
 
   test("mask without edit/ref throws", () => {
     expect(() => validateProviderCapabilities(fakeProvider("openai") as any, {
@@ -74,6 +111,12 @@ describe("validateProviderCapabilities", () => {
 
   test("mask with ref OK for openai", () => {
     expect(() => validateProviderCapabilities(fakeProvider("openai") as any, {
+      mask: "/tmp/m.png", ref: ["/tmp/r.png"],
+    })).not.toThrow();
+  });
+
+  test("mask with ref OK for apimart (no command-layer block)", () => {
+    expect(() => validateProviderCapabilities(fakeProvider("apimart") as any, {
       mask: "/tmp/m.png", ref: ["/tmp/r.png"],
     })).not.toThrow();
   });

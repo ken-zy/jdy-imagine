@@ -30,8 +30,9 @@ bun scripts/main.ts generate --provider openai \
 | `--ref <path>` | yes | yes | Google: inlineData; OpenAI: image[] in /edits |
 | `--edit <path>` | yes (fallback) | yes (native) | Google treats as ref[0]; OpenAI routes to /edits |
 | `--mask <path>` | throws | yes (needs --edit or --ref) | |
-| `--ar` | yes | yes | OpenAI uses fixed SIZE_TABLE mapping |
-| `--quality normal\|2k` | yes | yes | OpenAI: normal→medium, 2k→high |
+| `--ar` | yes (7) | yes (7) | OpenAI uses fixed SIZE_TABLE mapping. CLI accepts 13 values; google/openai reject the 6 extras (5:4, 4:5, 2:1, 1:2, 21:9, 9:21) — apimart-only |
+| `--resolution 1k\|2k\|4k` | yes (1k, 2k) | yes (1k, 2k) | google/openai reject `4k` — apimart-only |
+| `--detail auto\|low\|medium\|high` | ignored | passed through | gpt-image-2 maps to native `quality` field |
 | `--chain` | yes | throws | OpenAI image API is stateless |
 | `--character` | yes | realtime only | Blocked in OpenAI batch (refs would be lost) |
 | `batch submit` | yes | text-only | OpenAI uses /v1/batches with 50% discount |
@@ -65,7 +66,7 @@ bun scripts/main.ts generate [options]
 
 ```bash
 bun scripts/main.ts generate --prompt "A sunset over mountains" --outdir ./images
-bun scripts/main.ts generate --prompt "A landscape" --ar 16:9 --quality 2k --outdir ./images
+bun scripts/main.ts generate --prompt "A landscape" --ar 16:9 --resolution 2k --detail high --outdir ./images
 ```
 
 #### Multiple prompts (sequential)
@@ -79,12 +80,12 @@ bun scripts/main.ts generate --prompts prompts.json --outdir ./images
 ```json
 [
   { "prompt": "A sunset over mountains", "ar": "16:9" },
-  { "prompt": "A cat portrait", "quality": "2k" },
+  { "prompt": "A cat portrait", "resolution": "2k", "detail": "high" },
   { "prompt": "Edit this photo", "ref": ["base.png"] }
 ]
 ```
 
-Per-task fields override global CLI flags. Paths in `ref` resolve relative to the JSON file's directory.
+Per-task fields override global CLI flags. Paths in `ref` resolve relative to the JSON file's directory. The legacy `quality` field is rejected — see [Migration](#migration---quality---resolution--detail).
 
 #### Character profile
 
@@ -200,7 +201,8 @@ bun scripts/main.ts batch cancel <jobId>
 | `--prompts` | | Path to prompts.json | |
 | `--model` | `-m` | Model ID | `gemini-3.1-flash-image-preview` |
 | `--ar` | | Aspect ratio | `1:1` |
-| `--quality` | | `normal` / `2k` | `2k` |
+| `--resolution` | | `1k` / `2k` / `4k` | `2k` |
+| `--detail` | | `auto` / `low` / `medium` / `high` | `high` |
 | `--ref` | | Reference image path(s), repeatable | |
 | `--character` | | Character profile JSON path | |
 | `--chain` | | Enable star-anchored chain mode (realtime only) | `false` |
@@ -208,7 +210,7 @@ bun scripts/main.ts batch cancel <jobId>
 | `--json` | | JSON output mode | `false` |
 | `--async` | | Async batch submission | `false` |
 
-Aspect ratio options: `1:1`, `16:9`, `9:16`, `4:3`, `3:4`, `3:2`, `2:3`
+Aspect ratio options (CLI accepts 13 values): `1:1`, `16:9`, `9:16`, `4:3`, `3:4`, `3:2`, `2:3` (google + openai), plus `5:4`, `4:5`, `2:1`, `1:2`, `21:9`, `9:21` (apimart-only — google + openai reject these via `validateRequest`).
 
 ## Supported Models
 
@@ -246,11 +248,13 @@ Override defaults via YAML front matter (searched in order):
 ```yaml
 ---
 default_provider: google
-default_model: gemini-3.1-flash-image-preview
-default_quality: 2k
+default_resolution: 2k
+default_detail: high
 default_ar: "1:1"
 ---
 ```
+
+(`default_model` is intentionally omitted; see the [advisory](#extendmd-default_model-advisory) below.)
 
 ### Priority
 
@@ -266,14 +270,65 @@ Examples:
 
 Multiple images from one prompt get `-a`, `-b` suffixes. Collisions get `-2`, `-3` suffixes.
 
+## Migration: --quality → --resolution + --detail
+
+The single `--quality` flag has been split into two independent dimensions to match what providers actually expose:
+
+- `--resolution {1k,2k,4k}` — output pixel resolution (was the dimensional half of `--quality 2k`)
+- `--detail {auto,low,medium,high}` — quality/sharpness tier (was the OpenAI-mapped half of `--quality 2k`; Gemini ignores)
+
+CLI migration:
+
+| Old | New |
+|---|---|
+| `--quality normal` | `--resolution 1k --detail medium` |
+| `--quality 2k` | `--resolution 2k --detail high` |
+
+EXTEND.md migration:
+
+```yaml
+# Old
+default_quality: 2k
+# New
+default_resolution: 2k
+default_detail: high
+```
+
+prompts.json migration:
+
+```json
+// Old
+{ "prompt": "...", "quality": "2k" }
+// New
+{ "prompt": "...", "resolution": "2k", "detail": "high" }
+```
+
+Any leftover `quality` field (CLI flag / EXTEND.md `default_quality` / prompts.json) triggers a migration error pointing back to this section.
+
+### EXTEND.md `default_model` advisory
+
+`default_model` in `EXTEND.md` is **provider-agnostic** — it applies regardless of which `--provider` you pick at runtime. With multiple providers having non-overlapping model namespaces (`gemini-3.1-...` / `gpt-image-2` / `gpt-image-2-official`), shipping `default_model: gemini-3.1-flash-image-preview` would silently leak Gemini's model name into other providers. Therefore `EXTEND.md.example` no longer ships a `default_model:` line.
+
+Override patterns:
+
+| Goal | Mechanism |
+|---|---|
+| Permanent custom model for one provider | `<PROVIDER>_IMAGE_MODEL` env var |
+| One-off custom model | `--model <id>` CLI flag |
+| Cross-provider override (rare) | keep `default_model` in EXTEND.md (will apply to every `--provider`) |
+
+Priority order: `--model` > `EXTEND.md default_model` > `<PROVIDER>_IMAGE_MODEL` env > provider's built-in default.
+
 ## prompts.json Format
 
 ```json
 [
   { "prompt": "A sunset over mountains", "ar": "16:9" },
-  { "prompt": "A cat portrait", "quality": "2k" },
+  { "prompt": "A cat portrait", "resolution": "2k", "detail": "high" },
   { "prompt": "Edit this", "ref": ["base.png", "overlay.png"] }
 ]
 ```
+
+Per-task fields: `prompt` (required), `ar`, `resolution`, `detail`, `ref`. All non-prompt fields are validated against the same allowlists `--ar` / `--resolution` / `--detail` enforce. Legacy `quality` field is rejected with migration guidance.
 
 All fields except `prompt` are optional and override global CLI flags.

@@ -32,8 +32,9 @@ import type {
 // being silently degraded to 3:2 (1536x1024). Earlier draft used OpenAI's
 // "popular sizes" of 1536x1024 / 1024x1536 for both 16:9 AND 3:2, which would
 // have given users the wrong aspect ratio when they asked for widescreen.
-const SIZE_TABLE: Record<"normal" | "2k", Record<string, string>> = {
-  normal: {
+// SIZE_TABLE indexed by `resolution` (1k/2k). 4k is rejected before lookup.
+const SIZE_TABLE: Record<"1k" | "2k", Record<string, string>> = {
+  "1k": {
     "1:1":  "1024x1024",  // 1.05M px
     "16:9": "1536x864",   // 1.33M px (864 = 54*16)
     "9:16": "864x1536",
@@ -53,18 +54,32 @@ const SIZE_TABLE: Record<"normal" | "2k", Record<string, string>> = {
   },
 };
 
-export function mapToOpenAISize(quality: "normal" | "2k", ar: string | null): string {
+const OPENAI_ALLOWED_AR = new Set([
+  "1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3",
+]);
+
+export function mapToOpenAISize(resolution: "1k" | "2k" | "4k", ar: string | null): string {
+  if (resolution === "4k") {
+    throw new Error("OpenAI provider does not support resolution=4k.");
+  }
   const effectiveAr = ar ?? "1:1";
-  const size = SIZE_TABLE[quality]?.[effectiveAr];
+  const size = SIZE_TABLE[resolution]?.[effectiveAr];
   if (!size) {
-    const supported = Object.keys(SIZE_TABLE[quality]).join(", ");
-    throw new Error(`Unsupported ar "${effectiveAr}" for quality "${quality}". Supported: ${supported}`);
+    const supported = Object.keys(SIZE_TABLE[resolution]).join(", ");
+    throw new Error(`Unsupported ar "${effectiveAr}" for resolution "${resolution}". Supported: ${supported}`);
   }
   return size;
 }
 
-export function mapToOpenAIQuality(quality: "normal" | "2k"): "low" | "medium" | "high" | "auto" {
-  return quality === "normal" ? "medium" : "high";
+function openaiValidateRequest(req: GenerateRequest): void {
+  if (req.resolution === "4k") {
+    throw new Error("OpenAI provider does not support resolution=4k.");
+  }
+  if (req.ar && !OPENAI_ALLOWED_AR.has(req.ar)) {
+    throw new Error(
+      `OpenAI provider does not support --ar ${req.ar}. Allowed: ${[...OPENAI_ALLOWED_AR].join(", ")}`,
+    );
+  }
 }
 
 export function mapOpenAIBatchState(raw: string): BatchJob["state"] {
@@ -125,8 +140,8 @@ export function buildGenerationsPayload(req: GenerateRequest): Record<string, un
     model: req.model,
     prompt: req.prompt,
     n: 1,
-    size: mapToOpenAISize(req.quality, req.ar),
-    quality: mapToOpenAIQuality(req.quality),
+    size: mapToOpenAISize(req.resolution, req.ar),
+    quality: req.detail,
     output_format: "png",
   };
 }
@@ -136,8 +151,8 @@ export function buildEditFormData(req: GenerateRequest): FormData {
   fd.append("model", req.model);
   fd.append("prompt", req.prompt);
   fd.append("n", "1");
-  fd.append("size", mapToOpenAISize(req.quality, req.ar));
-  fd.append("quality", mapToOpenAIQuality(req.quality));
+  fd.append("size", mapToOpenAISize(req.resolution, req.ar));
+  fd.append("quality", req.detail);
   fd.append("output_format", "png");
 
   // image[] order: editTarget first (if any), then refs (incl. character refs)
@@ -304,6 +319,7 @@ export function createOpenAIProvider(config: ProviderConfig): Provider {
   return {
     name: "openai",
     defaultModel: "gpt-image-2",
+    validateRequest: openaiValidateRequest,
     generate: generateOnce,
 
     async batchCreate(req: BatchCreateRequest): Promise<BatchJob> {

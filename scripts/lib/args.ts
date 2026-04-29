@@ -8,7 +8,10 @@ export interface ParsedArgs {
     model?: string;
     provider?: string;
     ar?: string;
-    quality?: string;
+    /** Resolution tier. */
+    resolution?: string;
+    /** Detail tier. */
+    detail?: string;
     ref?: string[];
     edit?: string;
     mask?: string;
@@ -19,6 +22,8 @@ export interface ParsedArgs {
     character?: string;
   };
 }
+
+import { assertAr, assertResolution, assertDetail } from "./validators";
 
 export function parseArgs(argv: string[]): ParsedArgs {
   const result: ParsedArgs = {
@@ -76,12 +81,30 @@ export function parseArgs(argv: string[]): ParsedArgs {
       case "--provider":
         result.flags.provider = nextVal(arg);
         break;
-      case "--ar":
-        result.flags.ar = nextVal(arg);
+      case "--ar": {
+        const v = nextVal(arg);
+        assertAr(v, "--ar");
+        result.flags.ar = v;
         break;
-      case "--quality":
-        result.flags.quality = nextVal(arg);
+      }
+      case "--quality": {
+        // Removed in Task 1.6. Throw with migration guidance.
+        // Lazy import to avoid circular dependency at module load time.
+        const { QUALITY_REMOVED_MSG } = require("./config") as { QUALITY_REMOVED_MSG: string };
+        throw new Error(QUALITY_REMOVED_MSG);
+      }
+      case "--resolution": {
+        const v = nextVal(arg);
+        assertResolution(v, "--resolution");
+        result.flags.resolution = v;
         break;
+      }
+      case "--detail": {
+        const v = nextVal(arg);
+        assertDetail(v, "--detail");
+        result.flags.detail = v;
+        break;
+      }
       case "--ref":
         if (!result.flags.ref) result.flags.ref = [];
         result.flags.ref.push(nextVal(arg));

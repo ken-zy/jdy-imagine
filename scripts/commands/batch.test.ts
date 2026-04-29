@@ -114,43 +114,127 @@ describe("payload estimation", () => {
   });
 });
 
-import { validateBatchTasks } from "./batch";
-import type { GenerateRequest } from "../providers/types";
+import { validateBatchTasks, runBatch } from "./batch";
+import type { GenerateRequest, Provider } from "../providers/types";
+import type { Config } from "../lib/config";
+import type { ParsedArgs } from "../lib/args";
 
 describe("validateBatchTasks for OpenAI", () => {
   test("text-only tasks pass", () => {
     expect(() => validateBatchTasks("openai", [
-      { prompt: "x", model: "m", ar: null, quality: "normal", refs: [], imageSize: "1K" },
+      { prompt: "x", model: "m", ar: null, resolution: "1k", detail: "medium", refs: [] },
     ])).not.toThrow();
   });
 
   test("tasks with refs throw", () => {
     expect(() => validateBatchTasks("openai", [
-      { prompt: "x", model: "m", ar: null, quality: "normal", refs: ["/tmp/a.png"], imageSize: "1K" },
+      { prompt: "x", model: "m", ar: null, resolution: "1k", detail: "medium", refs: ["/tmp/a.png"] },
     ])).toThrow(/text-only/i);
   });
 
   test("tasks with editTarget throw", () => {
     expect(() => validateBatchTasks("openai", [
-      { prompt: "x", model: "m", ar: null, quality: "normal", refs: [], imageSize: "1K", editTarget: "/tmp/e.png" },
+      { prompt: "x", model: "m", ar: null, resolution: "1k", detail: "medium", refs: [], editTarget: "/tmp/e.png" },
     ])).toThrow(/text-only/i);
   });
 
   test("tasks with mask throw", () => {
     expect(() => validateBatchTasks("openai", [
-      { prompt: "x", model: "m", ar: null, quality: "normal", refs: [], imageSize: "1K", mask: "/tmp/m.png" },
+      { prompt: "x", model: "m", ar: null, resolution: "1k", detail: "medium", refs: [], mask: "/tmp/m.png" },
     ])).toThrow(/text-only/i);
   });
 
   test("error message mentions character profile", () => {
     expect(() => validateBatchTasks("openai", [
-      { prompt: "x", model: "m", ar: null, quality: "normal", refs: ["/tmp/a.png"], imageSize: "1K" },
+      { prompt: "x", model: "m", ar: null, resolution: "1k", detail: "medium", refs: ["/tmp/a.png"] },
     ])).toThrow(/character/i);
   });
 
   test("google provider unaffected by validateBatchTasks", () => {
     expect(() => validateBatchTasks("google", [
-      { prompt: "x", model: "m", ar: null, quality: "normal", refs: ["/tmp/a.png"], imageSize: "1K" },
+      { prompt: "x", model: "m", ar: null, resolution: "1k", detail: "medium", refs: ["/tmp/a.png"] },
     ])).not.toThrow();
+  });
+});
+
+describe("batchSubmit calls provider.validateRequest", () => {
+  function setup(opts: { tasks: unknown[]; validateRequest?: (req: GenerateRequest) => void }): {
+    provider: Provider;
+    config: Config;
+    args: ParsedArgs;
+  } {
+    const dir = mkdtempSync(join(tmpdir(), "batch-validate-"));
+    const promptsPath = join(dir, "prompts.json");
+    writeFileSync(promptsPath, JSON.stringify(opts.tasks));
+    const provider: Provider = {
+      name: "fake",
+      defaultModel: "fake-model",
+      validateRequest: opts.validateRequest,
+      generate: async () => ({ images: [], finishReason: "STOP" as const }),
+      batchCreate: async () => ({
+        id: "batches/fake",
+        state: "running" as const,
+        createTime: "2026-04-29T00:00:00Z",
+      }),
+      batchGet: async () => ({
+        id: "batches/fake",
+        state: "succeeded" as const,
+        createTime: "2026-04-29T00:00:00Z",
+      }),
+      batchFetch: async () => [],
+    };
+    const config: Config = {
+      provider: "fake",
+      model: "fake-model",
+      resolution: "2k",
+      detail: "high",
+      ar: "1:1",
+      apiKey: "k",
+      baseUrl: "https://fake",
+    };
+    const args: ParsedArgs = {
+      command: "batch",
+      subcommand: "submit",
+      positional: promptsPath,
+      flags: { outdir: dir, json: false, async: true, chain: false },
+    };
+    return { provider, config, args };
+  }
+
+  test("validateRequest is invoked for every task in batch submit", async () => {
+    const seen: string[] = [];
+    const { provider, config, args } = setup({
+      tasks: [
+        { prompt: "a" },
+        { prompt: "b" },
+      ],
+      validateRequest: (req) => {
+        seen.push(req.prompt);
+      },
+    });
+    await runBatch(provider, config, args);
+    expect(seen).toEqual(["a", "b"]);
+  });
+
+  test("validateRequest throw aborts batch submit before batchCreate", async () => {
+    let batchCreateCalled = false;
+    const { provider, config, args } = setup({
+      tasks: [{ prompt: "x", ar: "5:4" }],
+      validateRequest: () => {
+        throw new Error("provider rejects ar=5:4");
+      },
+    });
+    provider.batchCreate = async () => {
+      batchCreateCalled = true;
+      return { id: "x", state: "running" as const, createTime: "" };
+    };
+    await expect(runBatch(provider, config, args)).rejects.toThrow(/ar=5:4/);
+    expect(batchCreateCalled).toBe(false);
+  });
+
+  test("provider without validateRequest still submits", async () => {
+    const { provider, config, args } = setup({ tasks: [{ prompt: "x" }] });
+    delete (provider as Partial<Provider>).validateRequest;
+    await expect(runBatch(provider, config, args)).resolves.toBeUndefined();
   });
 });

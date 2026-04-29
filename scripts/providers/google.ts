@@ -13,10 +13,37 @@ import type {
   ChainAnchor,
 } from "./types";
 
-// Re-export for backward compatibility — the canonical location is types.ts.
-// generate.ts and batch.ts can import from either path; existing tests that
-// import from "./google" continue to work.
-export { mapQualityToImageSize } from "./types";
+const GOOGLE_ALLOWED_AR = new Set([
+  "1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3",
+]);
+
+/** Derive Gemini's required uppercase imageSize from the resolution field.
+ * `4k` is rejected — Google does not expose a 4K size dial. */
+function deriveGoogleImageSize(req: GenerateRequest): "1K" | "2K" {
+  if (req.resolution === "4k") {
+    throw new Error("Google provider does not support resolution=4k. Use --resolution 1k or 2k.");
+  }
+  return req.resolution === "1k" ? "1K" : "2K";
+}
+
+function googleValidateRequest(req: GenerateRequest): void {
+  // Mirror the runtime check that generateCore/generateChained/batchCreate already do via
+  // rejectMask(), so the command-layer preflight catches mask+google before any task runs.
+  // Without this, the realtime preflight loop in commands/generate.ts only fails on
+  // resolution/ar — mask still surfaces, but as "task 1 throws mid-loop" rather than the
+  // fail-fast contract the surrounding code advertises.
+  if (req.mask) {
+    throw new Error("Google provider does not support --mask. Mask is OpenAI-only.");
+  }
+  if (req.resolution === "4k") {
+    throw new Error("Google provider does not support resolution=4k.");
+  }
+  if (req.ar && !GOOGLE_ALLOWED_AR.has(req.ar)) {
+    throw new Error(
+      `Google provider does not support --ar ${req.ar}. Allowed: ${[...GOOGLE_ALLOWED_AR].join(", ")}`,
+    );
+  }
+}
 
 export function buildRealtimeRequestBody(req: GenerateRequest): {
   contents: Array<{
@@ -55,7 +82,7 @@ export function buildRealtimeRequestBody(req: GenerateRequest): {
     contents: [{ role: "user", parts }],
     generationConfig: {
       responseModalities: ["IMAGE"],
-      imageConfig: { imageSize: req.imageSize },
+      imageConfig: { imageSize: deriveGoogleImageSize(req) },
     },
   };
 }
@@ -187,7 +214,7 @@ export function buildChainedRequestBody(
     ],
     generationConfig: {
       responseModalities: ["IMAGE"],
-      imageConfig: { imageSize: req.imageSize },
+      imageConfig: { imageSize: deriveGoogleImageSize(req) },
     },
   };
 }
@@ -248,7 +275,7 @@ export function buildBatchRequestBody(
         contents: [{ parts }],
         generationConfig: {
           responseModalities: ["IMAGE"],
-          imageConfig: { imageSize: task.imageSize },
+          imageConfig: { imageSize: deriveGoogleImageSize(task) },
         },
       },
       metadata: { key: `${seq}-${slug}` },
@@ -305,7 +332,7 @@ export function buildBatchJsonl(
         contents: [{ parts }],
         generationConfig: {
           responseModalities: ["IMAGE"],
-          imageConfig: { imageSize: task.imageSize },
+          imageConfig: { imageSize: deriveGoogleImageSize(task) },
         },
       },
     };
@@ -452,6 +479,7 @@ export function createGoogleProvider(
   return {
     name: "google",
     defaultModel: "gemini-3.1-flash-image-preview",
+    validateRequest: googleValidateRequest,
     generate: generateWithRetry,
 
     // Chain: first task — generate + create anchor in one call

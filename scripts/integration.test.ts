@@ -27,27 +27,35 @@ describe("Integration: CLI -> provider -> output pipeline", () => {
       "generate",
       "--prompt", "A sunset over mountains",
       "--ar", "16:9",
-      "--quality", "2k",
+      "--resolution", "2k",
+      "--detail", "high",
       "--outdir", tempDir,
     ]);
     expect(args.command).toBe("generate");
 
     // 2. Merge config
     const config = mergeConfig(
-      { model: args.flags.model, ar: args.flags.ar, quality: args.flags.quality },
+      {
+        model: args.flags.model,
+        ar: args.flags.ar,
+        resolution: args.flags.resolution,
+        detail: args.flags.detail,
+      },
       {},
       { GOOGLE_API_KEY: "test-key" },
     );
     expect(config.model).toBe("gemini-3.1-flash-image-preview");
+    expect(config.resolution).toBe("2k");
+    expect(config.detail).toBe("high");
 
     // 3. Build request
     const req = buildRealtimeRequestBody({
       prompt: args.flags.prompt!,
       model: config.model,
       ar: args.flags.ar ?? config.ar,
-      quality: config.quality,
+      resolution: config.resolution,
+      detail: config.detail,
       refs: [],
-      imageSize: "2K",
     });
     expect(req.contents[0].parts[0].text).toContain("A sunset");
 
@@ -102,7 +110,7 @@ describe("Integration: CLI -> provider -> output pipeline", () => {
 
     const tasks = loadPrompts(
       { prompts: promptsFile },
-      { model: "test", ar: "1:1", quality: "2k", refs: [] },
+      { model: "test", ar: "1:1", resolution: "2k", detail: "high", refs: [] },
     );
     expect(tasks).toHaveLength(2);
     expect(tasks[0].ar).toBe("16:9");
@@ -205,7 +213,7 @@ describe("chain orchestration with fake provider", () => {
     await runGenerate(fakeProvider as any, {
       provider: "fake",
       model: "fake-model",
-      quality: "normal" as const,
+      resolution: "1k", detail: "medium" as const,
       ar: "1:1",
       apiKey: "fake",
       baseUrl: "http://fake",
@@ -248,7 +256,7 @@ describe("chain orchestration with fake provider", () => {
     process.exit = ((code: number) => { exitCode = code; }) as any;
     try {
       await runGenerate(fakeProvider as any, {
-        provider: "fake", model: "fake", quality: "normal" as const,
+        provider: "fake", model: "fake", resolution: "1k", detail: "medium" as const,
         ar: "1:1", apiKey: "fake", baseUrl: "http://fake",
       }, {
         prompts: promptsPath, outdir: dir, json: true, chain: true,
@@ -278,7 +286,7 @@ describe("integration: OpenAI provider", () => {
         apiKey: "k", baseUrl: "https://api.openai.com", model: "gpt-image-2",
       });
       await runGenerate(provider, {
-        provider: "openai", model: "gpt-image-2", quality: "normal", ar: "1:1",
+        provider: "openai", model: "gpt-image-2", resolution: "1k", detail: "medium", ar: "1:1",
         apiKey: "k", baseUrl: "https://api.openai.com",
       }, {
         prompt: "test cat", outdir: tmpOut, json: false,
@@ -312,7 +320,7 @@ describe("integration: OpenAI provider", () => {
         apiKey: "k", baseUrl: "https://api.openai.com", model: "gpt-image-2",
       });
       await runGenerate(provider, {
-        provider: "openai", model: "gpt-image-2", quality: "normal", ar: "1:1",
+        provider: "openai", model: "gpt-image-2", resolution: "1k", detail: "medium", ar: "1:1",
         apiKey: "k", baseUrl: "https://api.openai.com",
       }, {
         prompt: "edit", edit: editFile, mask: maskFile, outdir: tmpOut, json: false,
@@ -368,7 +376,7 @@ describe("integration: OpenAI provider", () => {
         apiKey: "k", baseUrl: "https://api.openai.com", model: "gpt-image-2",
       });
       await runBatch(provider, {
-        provider: "openai", model: "gpt-image-2", quality: "normal", ar: "1:1",
+        provider: "openai", model: "gpt-image-2", resolution: "1k", detail: "medium", ar: "1:1",
         apiKey: "k", baseUrl: "https://api.openai.com",
       }, {
         command: "batch", subcommand: "submit", positional: promptsFile,

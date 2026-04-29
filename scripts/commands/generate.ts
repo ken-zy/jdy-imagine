@@ -9,8 +9,8 @@ import {
   nextSeqNumber,
   mimeToExt,
 } from "../lib/output";
-import type { Config } from "../lib/config";
-import { mapQualityToImageSize } from "../providers/google";
+import { type Config, QUALITY_REMOVED_MSG } from "../lib/config";
+import { assertAr, assertResolution, assertDetail, type Resolution, type Detail } from "../lib/validators";
 import { loadCharacter, applyCharacterPrompt, mergeCharacterRefs, type CharacterProfile } from "../lib/character";
 
 export interface GenerateFlags {
@@ -39,9 +39,8 @@ export function validateProviderCapabilities(
   provider: Provider,
   flags: { mask?: string; edit?: string; ref?: string[]; chain?: boolean },
 ): void {
-  if (flags.mask && provider.name !== "openai") {
-    throw new Error(`--mask is supported only by openai provider (got: ${provider.name})`);
-  }
+  // mask is now a capability flag — providers self-reject (google.rejectMask). The old
+  // `provider.name !== "openai"` check has been removed (apimart also supports mask).
   if (flags.mask && !flags.edit && (!flags.ref || flags.ref.length === 0)) {
     throw new Error("--mask requires --edit or --ref to specify the image being masked");
   }
@@ -53,20 +52,28 @@ export function validateProviderCapabilities(
 interface PromptTask {
   prompt: string;
   ar?: string;
-  quality?: "normal" | "2k";
+  resolution?: Resolution;
+  detail?: Detail;
   refs: string[];
 }
 
 export function loadPrompts(
   flags: GenerateFlags,
-  defaults: { model: string; ar: string; quality: "normal" | "2k"; refs: string[] },
+  defaults: {
+    model: string;
+    ar: string;
+    resolution: Resolution;
+    detail: Detail;
+    refs: string[];
+  },
 ): PromptTask[] {
   if (flags.prompt) {
     return [
       {
         prompt: flags.prompt,
         ar: defaults.ar,
-        quality: defaults.quality,
+        resolution: defaults.resolution,
+        detail: defaults.detail,
         refs: flags.ref ?? defaults.refs,
       },
     ];
@@ -77,17 +84,32 @@ export function loadPrompts(
   const tasks = JSON.parse(content) as Array<{
     prompt: string;
     ar?: string;
-    quality?: "normal" | "2k";
+    quality?: string;
+    resolution?: string;
+    detail?: string;
     ref?: string[];
   }>;
 
+  // Migrate: prompts.json `quality` field is removed. Throw with QUALITY_REMOVED_MSG.
+  for (const t of tasks) {
+    if ("quality" in t && t.quality !== undefined) {
+      throw new Error(QUALITY_REMOVED_MSG);
+    }
+  }
+
   const dir = dirname(filePath);
-  return tasks.map((t) => ({
-    prompt: t.prompt,
-    ar: t.ar ?? defaults.ar,
-    quality: t.quality ?? defaults.quality,
-    refs: t.ref?.map((r) => resolve(dir, r)) ?? defaults.refs,
-  }));
+  return tasks.map((t, idx) => {
+    if (t.ar !== undefined) assertAr(t.ar, `prompts.json[${idx}].ar`);
+    if (t.resolution !== undefined) assertResolution(t.resolution, `prompts.json[${idx}].resolution`);
+    if (t.detail !== undefined) assertDetail(t.detail, `prompts.json[${idx}].detail`);
+    return {
+      prompt: t.prompt,
+      ar: t.ar ?? defaults.ar,
+      resolution: (t.resolution as Resolution | undefined) ?? defaults.resolution,
+      detail: (t.detail as Detail | undefined) ?? defaults.detail,
+      refs: t.ref?.map((r) => resolve(dir, r)) ?? defaults.refs,
+    };
+  });
 }
 
 // No hidden contracts — generateAndAnchor is in the public Provider interface
@@ -119,7 +141,8 @@ export async function runGenerate(
   const tasks = loadPrompts(flags, {
     model: config.model,
     ar: config.ar,
-    quality: config.quality,
+    resolution: config.resolution,
+    detail: config.detail,
     refs: flags.ref?.map((r) => resolve(r)) ?? [],
   });
 
@@ -143,6 +166,31 @@ export async function runGenerate(
     }
   }
 
+  // Build all GenerateRequests up front for fail-fast preflight (refs already merged).
+  // resolution/detail were already validated in loadPrompts → safe to read directly.
+  const builtReqs: GenerateRequest[] = tasks.map((task) => ({
+    prompt: task.prompt,
+    model: config.model,
+    ar: task.ar ?? null,
+    resolution: task.resolution ?? config.resolution,
+    detail: task.detail ?? config.detail,
+    refs: task.refs,
+    editTarget: flags.edit,
+    mask: flags.mask,
+  }));
+
+  // Fail-fast preflight: 16-image cap on final merged refs, plus provider self-check.
+  for (const req of builtReqs) {
+    const totalImages = req.refs.length + (req.editTarget ? 1 : 0);
+    if (totalImages > 16) {
+      throw new Error(
+        `Task with prompt "${req.prompt.slice(0, 40)}" has ${totalImages} image inputs ` +
+          `(refs + editTarget). Maximum is 16.`,
+      );
+    }
+    provider.validateRequest?.(req);
+  }
+
   let anchor: ChainAnchor | undefined;
   let hasAnchor = false;
 
@@ -151,17 +199,7 @@ export async function runGenerate(
   for (let taskIdx = 0; taskIdx < tasks.length; taskIdx++) {
     const task = tasks[taskIdx];
     const isFirstTask = taskIdx === 0;
-
-    const req: GenerateRequest = {
-      prompt: task.prompt,
-      model: config.model,
-      ar: task.ar ?? null,
-      quality: task.quality ?? config.quality,
-      refs: task.refs,
-      imageSize: mapQualityToImageSize(task.quality ?? config.quality),
-      editTarget: flags.edit,
-      mask: flags.mask,
-    };
+    const req: GenerateRequest = builtReqs[taskIdx];
 
     let result: GenerateResult;
 

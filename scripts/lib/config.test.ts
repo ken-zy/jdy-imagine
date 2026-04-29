@@ -81,8 +81,103 @@ describe("mergeConfig", () => {
     const config = mergeConfig({}, {}, {});
     expect(config.model).toBe("gemini-3.1-flash-image-preview");
     expect(config.provider).toBe("google");
-    expect(config.quality).toBe("2k");
+    expect(config.resolution).toBe("2k");
+    expect(config.detail).toBe("high");
     expect(config.ar).toBe("1:1");
+  });
+});
+
+describe("mergeConfig resolution/detail (Task 1.3 additive)", () => {
+  test("default resolution=2k, detail=high", () => {
+    const c = mergeConfig({}, {}, {});
+    expect(c.resolution).toBe("2k");
+    expect(c.detail).toBe("high");
+  });
+
+  test("CLI flags override defaults", () => {
+    const c = mergeConfig({ resolution: "4k", detail: "low" }, {}, {});
+    expect(c.resolution).toBe("4k");
+    expect(c.detail).toBe("low");
+  });
+
+  test("EXTEND.md default_resolution / default_detail parse", () => {
+    const c = mergeConfig({}, { default_resolution: "1k", default_detail: "medium" }, {});
+    expect(c.resolution).toBe("1k");
+    expect(c.detail).toBe("medium");
+  });
+
+});
+
+describe("mergeConfig EXTEND.md runtime validation (no type-cast lies)", () => {
+  test("invalid default_resolution throws with allowlist hint", () => {
+    expect(() =>
+      mergeConfig({}, { default_resolution: "3k" }, {}),
+    ).toThrow(/Invalid EXTEND\.md default_resolution: 3k.*1k\|2k\|4k/);
+  });
+
+  test("invalid default_detail throws with allowlist hint", () => {
+    expect(() =>
+      mergeConfig({}, { default_detail: "ultra" }, {}),
+    ).toThrow(/Invalid EXTEND\.md default_detail: ultra.*auto\|low\|medium\|high/);
+  });
+
+  test("invalid default_ar throws with allowlist hint", () => {
+    expect(() =>
+      mergeConfig({}, { default_ar: "7:13" }, {}),
+    ).toThrow(/Invalid EXTEND\.md default_ar: 7:13/);
+  });
+
+  test("13-value ar is accepted via EXTEND.md", () => {
+    const c = mergeConfig({}, { default_ar: "21:9" }, {});
+    expect(c.ar).toBe("21:9");
+  });
+});
+
+describe("mergeConfig apimart provider", () => {
+  test("provider=apimart picks APIMART_* env", () => {
+    const c = mergeConfig(
+      { provider: "apimart" },
+      {},
+      {
+        APIMART_API_KEY: "sk-am",
+        APIMART_BASE_URL: "https://api.apimart.ai",
+        APIMART_IMAGE_MODEL: "gpt-image-2-official",
+      },
+    );
+    expect(c.provider).toBe("apimart");
+    expect(c.apiKey).toBe("sk-am");
+    expect(c.baseUrl).toBe("https://api.apimart.ai");
+    expect(c.model).toBe("gpt-image-2-official");
+  });
+
+  test("apimart default baseUrl + defaultModel", () => {
+    const c = mergeConfig(
+      { provider: "apimart" },
+      {},
+      { APIMART_API_KEY: "k" },
+    );
+    expect(c.baseUrl).toBe("https://api.apimart.ai");
+    expect(c.model).toBe("gpt-image-2-official");
+  });
+
+  test("default_model in EXTEND.md leaks across providers (documented behavior)", () => {
+    // Reproduces the P1-1 risk: if user sets default_model: gemini-..., switching --provider
+    // doesn't auto-reset it. Test asserts the priority order is intentional and points users
+    // to --model override or per-provider env.
+    const c = mergeConfig(
+      { provider: "apimart" },
+      { default_model: "gemini-3.1-flash-image-preview" },
+      { APIMART_API_KEY: "k", APIMART_IMAGE_MODEL: "gpt-image-2-official" },
+    );
+    // Documented priority: cliFlags.model > extendMd.default_model > envModel > providerDefault
+    expect(c.model).toBe("gemini-3.1-flash-image-preview");
+    // Escape hatch: explicit --model wins.
+    const c2 = mergeConfig(
+      { provider: "apimart", model: "gpt-image-2-official" },
+      { default_model: "gemini-3.1-flash-image-preview" },
+      { APIMART_API_KEY: "k" },
+    );
+    expect(c2.model).toBe("gpt-image-2-official");
   });
 });
 

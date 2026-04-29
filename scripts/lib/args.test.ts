@@ -8,7 +8,8 @@ describe("parseArgs", () => {
       "--prompt", "A cat",
       "--outdir", "./images",
       "--ar", "16:9",
-      "--quality", "2k",
+      "--resolution", "2k",
+      "--detail", "high",
       "--model", "gemini-3-pro-image-preview",
       "--ref", "source.png",
     ]);
@@ -16,7 +17,8 @@ describe("parseArgs", () => {
     expect(result.flags.prompt).toBe("A cat");
     expect(result.flags.outdir).toBe("./images");
     expect(result.flags.ar).toBe("16:9");
-    expect(result.flags.quality).toBe("2k");
+    expect(result.flags.resolution).toBe("2k");
+    expect(result.flags.detail).toBe("high");
     expect(result.flags.model).toBe("gemini-3-pro-image-preview");
     expect(result.flags.ref).toEqual(["source.png"]);
   });
@@ -126,5 +128,49 @@ describe("parseArgs --edit / --mask", () => {
     ]);
     expect(args.flags.mask).toBe("/tmp/m.png");
     expect(args.flags.edit).toBe("/tmp/e.png");
+  });
+});
+
+describe("args resolution/detail/ar (Task 1.2 additive)", () => {
+  test("parses --resolution 4k --detail high", () => {
+    const a = parseArgs(["generate", "--prompt", "x", "--resolution", "4k", "--detail", "high"]);
+    expect(a.flags.resolution).toBe("4k");
+    expect(a.flags.detail).toBe("high");
+  });
+
+  test("parses --resolution 1k", () => {
+    const a = parseArgs(["generate", "--prompt", "x", "--resolution", "1k"]);
+    expect(a.flags.resolution).toBe("1k");
+  });
+
+  test("parses --detail auto/low/medium/high", () => {
+    for (const d of ["auto", "low", "medium", "high"]) {
+      const a = parseArgs(["generate", "--prompt", "x", "--detail", d]);
+      expect(a.flags.detail).toBe(d);
+    }
+  });
+
+  test("rejects invalid --resolution", () => {
+    expect(() => parseArgs(["generate", "--prompt", "x", "--resolution", "8k"])).toThrow();
+  });
+
+  test("rejects invalid --detail", () => {
+    expect(() => parseArgs(["generate", "--prompt", "x", "--detail", "ultra"])).toThrow();
+  });
+
+  test("accepts all 13 ar values", () => {
+    const ars = ["1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3", "5:4", "4:5", "2:1", "1:2", "21:9", "9:21"];
+    for (const ar of ars) {
+      const a = parseArgs(["generate", "--prompt", "x", "--ar", ar]);
+      expect(a.flags.ar).toBe(ar);
+    }
+  });
+
+  test("rejects invalid --ar", () => {
+    expect(() => parseArgs(["generate", "--prompt", "x", "--ar", "7:13"])).toThrow();
+  });
+
+  test("--quality throws migration after Task 1.6", () => {
+    expect(() => parseArgs(["generate", "--prompt", "x", "--quality", "2k"])).toThrow(/quality.*removed/i);
   });
 });

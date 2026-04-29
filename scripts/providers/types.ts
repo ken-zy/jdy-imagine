@@ -2,9 +2,11 @@ export interface GenerateRequest {
   prompt: string;
   model: string;
   ar: string | null;
-  quality: "normal" | "2k";
+  /** Resolution tier. Google derives uppercase imageSize internally. */
+  resolution: "1k" | "2k" | "4k";
+  /** Detail tier. OpenAI passes through to its quality field; Gemini ignores. */
+  detail: "auto" | "low" | "medium" | "high";
   refs: string[];                 // 参考图（风格/构图样板）
-  imageSize: "1K" | "2K" | "4K";
   editTarget?: string;            // OpenAI: route to /v1/images/edits; Google: fallback to refs[0]
   mask?: string;                  // OpenAI edit only; Google: provider throws
 }
@@ -65,6 +67,12 @@ export interface Provider {
   name: string;
   defaultModel: string;
 
+  /** Optional fail-fast hook called by command layer for every final GenerateRequest before any
+   * provider.generate / batchCreate runs. Provider throws if the request violates its capabilities
+   * (e.g. apimart 4K requires specific ar; google does not support 4K). Skipping this hook is OK;
+   * generate() still does its own runtime validation. */
+  validateRequest?(req: GenerateRequest): void;
+
   // Realtime
   generate(req: GenerateRequest): Promise<GenerateResult>;
 
@@ -80,10 +88,3 @@ export interface Provider {
   batchCancel?(jobId: string): Promise<void>;
 }
 
-// Provider-agnostic enum mapping. Located in types.ts so consumers don't depend
-// on a specific provider implementation file.
-export function mapQualityToImageSize(
-  quality: "normal" | "2k",
-): "1K" | "2K" {
-  return quality === "normal" ? "1K" : "2K";
-}
