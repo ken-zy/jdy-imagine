@@ -390,3 +390,249 @@ describe("integration: OpenAI provider", () => {
     }
   }, 60_000);
 });
+
+describe("integration: apimart provider", () => {
+  const apimartConfig = {
+    provider: "apimart" as const,
+    model: "gpt-image-2-official",
+    resolution: "2k" as const,
+    detail: "high" as const,
+    ar: "16:9",
+    apiKey: "k",
+    baseUrl: "https://api.apimart.test",
+  };
+  const fastOpts = {
+    pollInitialMs: 0,
+    pollIntervalMs: 0,
+    pollTimeoutMs: 5000,
+    sleep: async () => {},
+    now: () => 0,
+  };
+
+  test("text-to-image: submit → poll → download", async () => {
+    const tmpOut = mkdtempSync(join(tmpdir(), "jdy-int-apimart-text-"));
+    let pollCount = 0;
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: any) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url.endsWith("/v1/images/generations")) {
+        return new Response(JSON.stringify({ data: [{ task_id: "task-int-1" }] }), { status: 200 });
+      }
+      if (url.endsWith("/v1/tasks/task-int-1")) {
+        pollCount++;
+        if (pollCount === 1) return new Response(JSON.stringify({ data: { status: "processing" } }), { status: 200 });
+        return new Response(JSON.stringify({
+          data: { status: "completed", result: { images: [{ url: ["https://cdn.apimart/img.png"] }] } },
+        }), { status: 200 });
+      }
+      if (url === "https://cdn.apimart/img.png") {
+        return new Response(new Uint8Array([0x89, 0x50, 0x4e, 0x47]), { status: 200 });
+      }
+      return new Response("nf", { status: 404 });
+    }) as typeof fetch;
+    try {
+      const { runGenerate } = await import("./commands/generate");
+      const { createApimartProvider } = await import("./providers/apimart");
+      const provider = createApimartProvider(apimartConfig, fastOpts);
+      await runGenerate(provider, apimartConfig, {
+        prompt: "a cyberpunk skyline",
+        outdir: tmpOut,
+        json: false,
+      });
+      const files = (await Bun.$`ls ${tmpOut}/`.text()).trim().split("\n").filter(f => f.endsWith(".png"));
+      expect(files.length).toBe(1);
+      expect(pollCount).toBeGreaterThanOrEqual(2);
+    } finally {
+      globalThis.fetch = originalFetch;
+      rmSync(tmpOut, { recursive: true, force: true });
+    }
+  });
+
+  test("image-to-image: upload + submit + poll + download (URL routed via image_urls[0])", async () => {
+    const tmpOut = mkdtempSync(join(tmpdir(), "jdy-int-apimart-i2i-"));
+    const refPath = join(tmpOut, "ref.png");
+    await Bun.write(refPath, new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x00]));
+    let submitBody: any;
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: any, init: any) => {
+      const req = new Request(input, init);
+      if (req.url.endsWith("/v1/uploads/images")) {
+        const fd = await req.formData();
+        const file = fd.get("file") as File;
+        return new Response(JSON.stringify({ url: `https://upload.apimart/${file.name}` }), { status: 200 });
+      }
+      if (req.url.endsWith("/v1/images/generations")) {
+        submitBody = await req.json();
+        return new Response(JSON.stringify({ data: [{ task_id: "t-i2i" }] }), { status: 200 });
+      }
+      if (req.url.includes("/v1/tasks/")) {
+        return new Response(JSON.stringify({
+          data: { status: "completed", result: { images: [{ url: "https://cdn.apimart/out.png" }] } },
+        }), { status: 200 });
+      }
+      return new Response(new Uint8Array([0x89, 0x50]), { status: 200 });
+    }) as typeof fetch;
+    try {
+      const { runGenerate } = await import("./commands/generate");
+      const { createApimartProvider } = await import("./providers/apimart");
+      const provider = createApimartProvider(apimartConfig, fastOpts);
+      await runGenerate(provider, apimartConfig, {
+        prompt: "make it golden",
+        ref: [refPath],
+        outdir: tmpOut,
+        json: false,
+      });
+      expect(submitBody.image_urls).toEqual(["https://upload.apimart/ref.png"]);
+      expect(submitBody.mask_url).toBeUndefined();
+    } finally {
+      globalThis.fetch = originalFetch;
+      rmSync(tmpOut, { recursive: true, force: true });
+    }
+  });
+
+  test("character profile + 4 prompts: cache deduplicates uploads to N unique hashes", async () => {
+    const tmpOut = mkdtempSync(join(tmpdir(), "jdy-int-apimart-char-"));
+    // Two character refs (unique hashes) — the runtime cache should upload each once even
+    // across all 4 prompts (4 × 2 = 8 ref-paths, but only 2 unique sha256 hashes).
+    const refA = join(tmpOut, "char-a.png");
+    const refB = join(tmpOut, "char-b.png");
+    await Bun.write(refA, new Uint8Array([1, 2, 3, 4, 5]));
+    await Bun.write(refB, new Uint8Array([6, 7, 8, 9, 10]));
+    const characterPath = join(tmpOut, "character.json");
+    writeFileSync(characterPath, JSON.stringify({
+      name: "Hero",
+      description: "wearing a red cape",
+      negative: "modern clothing",
+      references: [refA, refB],
+    }));
+    const promptsPath = join(tmpOut, "prompts.json");
+    writeFileSync(promptsPath, JSON.stringify([
+      { prompt: "scene 1" },
+      { prompt: "scene 2" },
+      { prompt: "scene 3" },
+      { prompt: "scene 4" },
+    ]));
+    let uploadCount = 0;
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: any, init: any) => {
+      const req = new Request(input, init);
+      if (req.url.endsWith("/v1/uploads/images")) {
+        uploadCount++;
+        const fd = await req.formData();
+        const file = fd.get("file") as File;
+        return new Response(JSON.stringify({ url: `https://upload.apimart/${file.name}` }), { status: 200 });
+      }
+      if (req.url.endsWith("/v1/images/generations")) {
+        return new Response(JSON.stringify({ data: [{ task_id: `t-${Math.random()}` }] }), { status: 200 });
+      }
+      if (req.url.includes("/v1/tasks/")) {
+        return new Response(JSON.stringify({
+          data: { status: "completed", result: { images: [{ url: "https://cdn.apimart/o.png" }] } },
+        }), { status: 200 });
+      }
+      return new Response(new Uint8Array([0x89, 0x50]), { status: 200 });
+    }) as typeof fetch;
+    try {
+      const { runGenerate } = await import("./commands/generate");
+      const { createApimartProvider } = await import("./providers/apimart");
+      const provider = createApimartProvider(apimartConfig, fastOpts);
+      await runGenerate(provider, apimartConfig, {
+        prompts: promptsPath,
+        character: characterPath,
+        outdir: tmpOut,
+        json: false,
+      });
+      // 2 unique character refs × 4 prompts = 8 upload requests if the cache failed; the
+      // sha256 cache should compress this to exactly 2 (one per unique hash).
+      expect(uploadCount).toBe(2);
+    } finally {
+      globalThis.fetch = originalFetch;
+      rmSync(tmpOut, { recursive: true, force: true });
+    }
+  });
+
+  test("failed-safety: poll returns SAFETY result without throwing", async () => {
+    const tmpOut = mkdtempSync(join(tmpdir(), "jdy-int-apimart-safety-"));
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: any) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url.endsWith("/v1/images/generations")) {
+        return new Response(JSON.stringify({ data: [{ task_id: "t-safety" }] }), { status: 200 });
+      }
+      return new Response(JSON.stringify({
+        data: { status: "failed", error: { message: "moderation_blocked", type: "policy_violation", code: 400 } },
+      }), { status: 200 });
+    }) as typeof fetch;
+    const originalExit = process.exit;
+    let exitCode = 0;
+    process.exit = ((code: number) => { exitCode = code; throw new Error("exited"); }) as any;
+    try {
+      const { runGenerate } = await import("./commands/generate");
+      const { createApimartProvider } = await import("./providers/apimart");
+      const provider = createApimartProvider(apimartConfig, fastOpts);
+      try {
+        await runGenerate(provider, apimartConfig, {
+          prompt: "blocked content",
+          outdir: tmpOut,
+          json: true,
+        });
+      } catch { /* runGenerate calls process.exit on safety, which our stub re-throws */ }
+      expect(exitCode).toBe(1);
+    } finally {
+      globalThis.fetch = originalFetch;
+      process.exit = originalExit;
+      rmSync(tmpOut, { recursive: true, force: true });
+    }
+  });
+
+  test("timeout: throws with task_id in message", async () => {
+    const tmpOut = mkdtempSync(join(tmpdir(), "jdy-int-apimart-timeout-"));
+    let mockTime = 0;
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: any) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url.endsWith("/v1/images/generations")) {
+        return new Response(JSON.stringify({ data: [{ task_id: "task-frozen" }] }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ data: { status: "processing" } }), { status: 200 });
+    }) as typeof fetch;
+    try {
+      const { createApimartProvider } = await import("./providers/apimart");
+      const provider = createApimartProvider(apimartConfig, {
+        pollInitialMs: 1, pollIntervalMs: 1, pollTimeoutMs: 50,
+        sleep: async (ms) => { mockTime += ms; },
+        now: () => mockTime,
+      });
+      await expect(provider.generate({
+        prompt: "x", model: "gpt-image-2-official", ar: "16:9",
+        resolution: "2k", detail: "high", refs: [],
+      })).rejects.toThrow(/task_id=task-frozen/);
+    } finally {
+      globalThis.fetch = originalFetch;
+      rmSync(tmpOut, { recursive: true, force: true });
+    }
+  });
+
+  test("cancelled: returns ERROR with reason 'cancelled'", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: any) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url.endsWith("/v1/images/generations")) {
+        return new Response(JSON.stringify({ data: [{ task_id: "t-cancel" }] }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ data: { status: "cancelled" } }), { status: 200 });
+    }) as typeof fetch;
+    try {
+      const { createApimartProvider } = await import("./providers/apimart");
+      const provider = createApimartProvider(apimartConfig, fastOpts);
+      const result = await provider.generate({
+        prompt: "x", model: "gpt-image-2-official", ar: "16:9",
+        resolution: "2k", detail: "high", refs: [],
+      });
+      expect(result.finishReason).toBe("ERROR");
+      expect(result.safetyInfo?.reason).toContain("cancelled");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+});

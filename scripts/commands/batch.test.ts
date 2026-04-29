@@ -157,6 +157,69 @@ describe("validateBatchTasks for OpenAI", () => {
   });
 });
 
+describe("batch refuses apimart with friendly message", () => {
+  function apimartProvider(): Provider {
+    return {
+      name: "apimart",
+      defaultModel: "gpt-image-2-official",
+      generate: async () => ({ images: [], finishReason: "STOP" as const }),
+      // No batchCreate / batchGet / batchFetch / batchList / batchCancel — apimart
+      // intentionally doesn't ship batch (no cost benefit; submit/poll is async anyway).
+    };
+  }
+
+  function configFor(): Config {
+    return {
+      provider: "apimart",
+      model: "gpt-image-2-official",
+      resolution: "2k",
+      detail: "high",
+      ar: "1:1",
+      apiKey: "k",
+      baseUrl: "https://api.apimart.test",
+    };
+  }
+
+  function args(sub: string, positional?: string): ParsedArgs {
+    return {
+      command: "batch",
+      subcommand: sub,
+      positional,
+      flags: { outdir: ".", json: false, async: false, chain: false },
+    };
+  }
+
+  test("submit → throws does-not-support", async () => {
+    await expect(runBatch(apimartProvider(), configFor(), args("submit", "p.json"))).rejects.toThrow(
+      /apimart does not support batch/i,
+    );
+  });
+
+  test("status → throws", async () => {
+    await expect(runBatch(apimartProvider(), configFor(), args("status", "task-x"))).rejects.toThrow(
+      /does not support batch/i,
+    );
+  });
+
+  test("fetch → throws", async () => {
+    await expect(runBatch(apimartProvider(), configFor(), args("fetch", "task-x"))).rejects.toThrow(
+      /does not support batch/i,
+    );
+  });
+
+  test("list → throws", async () => {
+    await expect(runBatch(apimartProvider(), configFor(), args("list"))).rejects.toThrow(
+      /does not support batch/i,
+    );
+  });
+
+  test("cancel → throws", async () => {
+    await expect(runBatch(apimartProvider(), configFor(), args("cancel", "task-x"))).rejects.toThrow(
+      /does not support batch/i,
+    );
+  });
+});
+
 describe("batchSubmit calls provider.validateRequest", () => {
   function setup(opts: { tasks: unknown[]; validateRequest?: (req: GenerateRequest) => void }): {
     provider: Provider;
