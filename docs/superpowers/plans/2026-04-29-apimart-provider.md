@@ -4,6 +4,8 @@
 
 **Goal:** Add a third image-generation provider `apimart` (China gateway for OpenAI gpt-image-2) supporting async task model, automatic image upload via apimart's own `/v1/uploads/images` endpoint, 4K output, and 13-value aspect ratio set. Concurrently repay the `quality` field abstraction debt by splitting it into `--resolution` and `--detail`.
 
+> **Corrigendum (post-PR #5):** The shipped implementation defines `RETRYABLE_STATUS` as `{0, 429, 500, 502, 503}`, not the `{429, 500, 502, 503}` written throughout this plan. The extra `0` covers `httpGetBytes`'s network-failure mode — unlike `httpPost` / `httpGet` (which surface fetch errors as the `503` sentinel), `httpGetBytes` returns `status=0` so the download path needs `0` in the retry set to reuse the same `callWithApimartRetry`. Read every `{429,500,502,503}` reference below as `{0,429,500,502,503}`.
+
 **Architecture:**
 
 - Two PRs landed sequentially. **PR 1** (`refactor/quality-to-resolution-detail`) is a pure refactor: rename `--quality` → `--resolution` + `--detail`, no new functionality. **PR 2** (`feat/apimart-provider`) is the new provider, based on PR 1's main.
@@ -1611,7 +1613,9 @@ const DEFAULT_POLL_INITIAL_WAIT_MS = 12_000;
 const DEFAULT_POLL_INTERVAL_MS = 3_000;
 const DEFAULT_POLL_TIMEOUT_MS = 180_000;
 const RETRY_DELAYS = [1_000, 2_000, 4_000];
-const RETRYABLE_STATUS = new Set([429, 500, 502, 503]);
+// Shipped impl adds 0: httpGetBytes uses status=0 as the network-failure sentinel
+// (httpPost/httpGet use 503 instead), so the download path needs it in the retry set.
+const RETRYABLE_STATUS = new Set([0, 429, 500, 502, 503]);
 const SAFETY_KEYWORDS = ["moderation","policy","unsafe","safety","block"];
 
 // Per plan-review P1-3: tests need to inject smaller timing values to avoid 180s real-time waits.
