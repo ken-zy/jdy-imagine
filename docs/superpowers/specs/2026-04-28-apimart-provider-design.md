@@ -1,5 +1,7 @@
 # apimart gpt-image-2 Provider 接入设计
 
+> **Corrigendum (post-PR #5)：** 落地实现的 `RETRYABLE_STATUS` 实际为 `{0, 429, 500, 502, 503}`，比本文各处出现的 `{429, 500, 502, 503}` 多一个 `0`。原因：`httpGetBytes` 在网络失败时返回 `status=0`（而 `httpPost` / `httpGet` 用 `503` 作为同类哨兵），下载路径要在重试集合里覆盖 `0` 才能复用同一套 `callWithApimartRetry`。本文档下方所有 `{429,500,502,503}` 引用均按 `{0,429,500,502,503}` 解读。
+
 ## Problem
 
 jdy-imagine 当前支持两个 provider：Google Gemini（本地参考图 + Files API batch）和 OpenAI gpt-image-2 直连（multipart + 服务端 batch）。用户在中国大陆使用 OpenAI 直连时受跨境网络制约（multipart 上传不走 HTTPS_PROXY，详见 README 能力矩阵），且无 4K / 扩展 aspect ratio 支持。
@@ -396,7 +398,8 @@ const POLL_INITIAL_WAIT_MS = 12_000;
 const POLL_INTERVAL_MS = 3_000;
 const POLL_TIMEOUT_MS = 180_000;
 const RETRY_DELAYS = [1_000, 2_000, 4_000];
-const RETRYABLE_STATUS = new Set([429, 500, 502, 503]);
+// 落地版加了 0：httpGetBytes 用 status=0 作为网络失败哨兵（与 httpPost/httpGet 用 503 不同）。
+const RETRYABLE_STATUS = new Set([0, 429, 500, 502, 503]);
 
 // === 上传 cache ===
 // run-scoped；同一进程内重复上传同一文件命中 cache。
