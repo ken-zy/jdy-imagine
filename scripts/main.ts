@@ -2,12 +2,14 @@ import { parseArgs } from "./lib/args";
 import { resolveConfig } from "./lib/config";
 import { createGoogleProvider } from "./providers/google";
 import { createOpenAIProvider } from "./providers/openai";
+import { createApimartProvider } from "./providers/apimart";
 import { runGenerate } from "./commands/generate";
 import type { ProviderConfig, ProviderFactory } from "./providers/types";
 
 const PROVIDERS: Record<string, ProviderFactory> = {
   google: createGoogleProvider,
   openai: createOpenAIProvider,
+  apimart: createApimartProvider,
 };
 
 async function main() {
@@ -22,7 +24,10 @@ async function main() {
 
   // Validate API key
   if (!config.apiKey) {
-    const envName = config.provider === "openai" ? "OPENAI_API_KEY" : "GOOGLE_API_KEY";
+    const envName =
+      config.provider === "openai"  ? "OPENAI_API_KEY"  :
+      config.provider === "apimart" ? "APIMART_API_KEY" :
+      "GOOGLE_API_KEY";
     console.error(
       `Missing API key. Set ${envName} environment variable,\n` +
       "or create a .env file at .jdy-imagine/.env or ~/.jdy-imagine/.env",
