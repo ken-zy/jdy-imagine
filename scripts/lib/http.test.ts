@@ -82,6 +82,84 @@ describe("httpGetText", () => {
   });
 });
 
+describe("httpGetBytes", () => {
+  test("returns raw bytes without JSON.parse", async () => {
+    const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = mock(async () => new Response(png, { status: 200 })) as any;
+    try {
+      const { httpGetBytes } = await import("./http");
+      const res = await httpGetBytes("https://example.com/img.png");
+      expect(res.status).toBe(200);
+      expect(res.bytes).toBeInstanceOf(Uint8Array);
+      expect(Array.from(res.bytes!.slice(0, 8))).toEqual(Array.from(png));
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("does not call JSON.parse on body (malformed bytes pass through)", async () => {
+    const malformed = new Uint8Array([0xff, 0xff, 0xff]);
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = mock(async () => new Response(malformed, { status: 200 })) as any;
+    try {
+      const { httpGetBytes } = await import("./http");
+      const res = await httpGetBytes("https://example.com/x");
+      expect(res.bytes).toBeDefined();
+      expect(Array.from(res.bytes!)).toEqual([0xff, 0xff, 0xff]);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("propagates non-200 status without throwing", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = mock(async () =>
+      new Response("not found", { status: 404 }),
+    ) as any;
+    try {
+      const { httpGetBytes } = await import("./http");
+      const res = await httpGetBytes("https://example.com/missing.png");
+      expect(res.status).toBe(404);
+      expect(res.bytes).toBeUndefined();
+      expect(res.error).toContain("not found");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("returns status 0 + error on network failure (no throw)", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = mock(async () => { throw new Error("ECONNRESET"); }) as any;
+    try {
+      const { httpGetBytes } = await import("./http");
+      const res = await httpGetBytes("https://example.com/x");
+      expect(res.status).toBe(0);
+      expect(res.error).toContain("ECONNRESET");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("forwards custom headers (e.g. apimart Authorization)", async () => {
+    const originalFetch = globalThis.fetch;
+    let capturedHeaders: Headers | undefined;
+    globalThis.fetch = mock(async (input: any, init: any) => {
+      const req = new Request(input, init);
+      capturedHeaders = req.headers;
+      return new Response(new Uint8Array([1, 2, 3]), { status: 200 });
+    }) as any;
+    try {
+      const { httpGetBytes } = await import("./http");
+      const res = await httpGetBytes("https://example.com/x", { Authorization: "Bearer k" });
+      expect(res.status).toBe(200);
+      expect(capturedHeaders!.get("Authorization")).toBe("Bearer k");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+});
+
 describe("httpPostMultipart", () => {
   test("posts FormData with custom headers and auto Content-Type", async () => {
     const originalFetch = globalThis.fetch;

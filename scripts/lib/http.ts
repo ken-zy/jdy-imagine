@@ -260,6 +260,87 @@ function curlGetText(
   }
 }
 
+export interface HttpBytesResponse {
+  status: number;
+  bytes?: Uint8Array;
+  error?: string;
+}
+
+/**
+ * Raw binary GET. Mirrors httpGetText's proxy/curl branch but returns Uint8Array
+ * instead of parsed JSON or text. Used for downloading rendered images from
+ * apimart's task-result URLs without forcing them through JSON.parse.
+ *
+ * Status semantics:
+ *   200      → bytes populated
+ *   non-200  → error populated with response body (truncated)
+ *   0        → network/curl failure; error populated with the underlying message
+ */
+export async function httpGetBytes(
+  url: string,
+  headers: Record<string, string> = {},
+): Promise<HttpBytesResponse> {
+  const proxy = detectProxy(process.env as Record<string, string>);
+  if (proxy) {
+    return curlGetBytes(url, headers, proxy);
+  }
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), TOTAL_TIMEOUT);
+  try {
+    const res = await fetch(url, { headers, signal: controller.signal });
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      return { status: res.status, error: body.slice(0, 500) };
+    }
+    const buf = await res.arrayBuffer();
+    return { status: res.status, bytes: new Uint8Array(buf) };
+  } catch (err) {
+    return { status: 0, error: `Network error: ${(err as Error).message}` };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function curlGetBytes(
+  url: string,
+  headers: Record<string, string>,
+  proxy: string,
+): HttpBytesResponse {
+  const args = [
+    "-s",
+    "--connect-timeout", String(CONNECT_TIMEOUT / 1000),
+    "--max-time", String(TOTAL_TIMEOUT / 1000),
+    "-x", proxy,
+    "-w", "\n%{http_code}",
+  ];
+  for (const [k, v] of Object.entries(headers)) {
+    args.push("-H", `${k}: ${v}`);
+  }
+  args.push(url);
+  try {
+    // Bun's execFileSync returns a Buffer when no encoding is set.
+    const output = execFileSync("curl", args, {
+      maxBuffer: 50 * 1024 * 1024,
+    });
+    const buf = Buffer.from(output);
+    // The trailer "\n<status>" is appended in ASCII; locate the last newline before the
+    // status code and split on that boundary so the binary body is preserved verbatim.
+    let end = buf.length;
+    while (end > 0 && buf[end - 1] !== 0x0a) end--;
+    const statusStart = end;
+    const status = parseInt(buf.slice(statusStart).toString("ascii"), 10);
+    // Drop the trailing newline that precedes the status line.
+    const bodyEnd = statusStart > 0 ? statusStart - 1 : 0;
+    const body = buf.slice(0, bodyEnd);
+    if (status >= 200 && status < 300) {
+      return { status, bytes: new Uint8Array(body) };
+    }
+    return { status, error: body.toString("utf-8").slice(0, 500) };
+  } catch (err) {
+    return { status: 0, error: `curl error: ${(err as Error).message}` };
+  }
+}
+
 export async function httpPostMultipart(
   url: string,
   formData: FormData,
