@@ -1,4 +1,5 @@
-import { httpPost, httpGet, httpGetBytes } from "../lib/http";
+import { basename } from "path";
+import { detectProxy, httpGet, httpGetBytes, httpPost, httpPostMultipart } from "../lib/http";
 import type {
   GenerateRequest,
   GenerateResult,
@@ -159,6 +160,80 @@ function buildApimartPayload(
   return payload;
 }
 
+type UploadCache = Map<string, Promise<string>>;
+
+async function fileSha256(localPath: string): Promise<string> {
+  const data = await Bun.file(localPath).arrayBuffer();
+  const hasher = new Bun.CryptoHasher("sha256");
+  hasher.update(new Uint8Array(data));
+  return hasher.digest("hex");
+}
+
+function inferMimeType(path: string): string {
+  const ext = path.split(".").pop()?.toLowerCase();
+  if (ext === "jpg" || ext === "jpeg") return "image/jpeg";
+  if (ext === "webp") return "image/webp";
+  if (ext === "gif") return "image/gif";
+  return "image/png";
+}
+
+function rejectMultipartUnderProxy(operation: string): void {
+  const proxy = detectProxy(process.env as Record<string, string>);
+  if (proxy) {
+    throw new Error(
+      `apimart ${operation} uses multipart upload which is not supported through HTTP proxy ` +
+        `(detected: ${proxy}). Disable the proxy environment variable for this command, ` +
+        `or use --provider openai/google for proxy-friendly workflows.`,
+    );
+  }
+}
+
+async function doUpload(
+  baseUrl: string,
+  headers: Record<string, string>,
+  localPath: string,
+  retryOpts: { sleep: (ms: number) => Promise<void> },
+): Promise<string> {
+  const buf = await Bun.file(localPath).arrayBuffer();
+  const fd = new FormData();
+  fd.append(
+    "file",
+    new Blob([buf], { type: inferMimeType(localPath) }),
+    basename(localPath),
+  );
+  const url = `${baseUrl}/v1/uploads/images`;
+  const res = await callWithApimartRetry(
+    () => httpPostMultipart(url, fd, headers),
+    "upload",
+    retryOpts,
+  );
+  const uploadUrl = (res.data as any)?.url;
+  if (typeof uploadUrl !== "string") {
+    throw new Error(`apimart upload response missing url: ${JSON.stringify(res.data)}`);
+  }
+  return uploadUrl;
+}
+
+async function uploadToApimartCached(
+  baseUrl: string,
+  headers: Record<string, string>,
+  localPath: string,
+  cache: UploadCache,
+  retryOpts: { sleep: (ms: number) => Promise<void> },
+): Promise<string> {
+  const hash = await fileSha256(localPath);
+  const cached = cache.get(hash);
+  if (cached) return await cached;
+  // CRITICAL: cache.set BEFORE await so concurrent same-hash calls hit the in-flight Promise.
+  // catch+delete on rejection so future generate() calls can re-attempt without poisoning.
+  const promise = doUpload(baseUrl, headers, localPath, retryOpts).catch((err) => {
+    cache.delete(hash);
+    throw err;
+  });
+  cache.set(hash, promise);
+  return await promise;
+}
+
 interface ResolvedPollOpts {
   initialMs: number;
   intervalMs: number;
@@ -229,14 +304,36 @@ export function createApimartProvider(
     now: opts.now ?? (() => Date.now()),
   };
   const retryOpts = { sleep };
+  const uploadCache: UploadCache = new Map();
 
   async function generate(req: GenerateRequest): Promise<GenerateResult> {
-    // Image-input path (refs/editTarget/mask) lands in Task 2.4.
+    let imageUrls: string[] | undefined;
+    let maskUrl: string | undefined;
+
     if (req.refs.length > 0 || req.editTarget || req.mask) {
-      throw new Error("apimart image inputs not yet implemented");
+      // Pre-emptive proxy guard: multipart uploads can't route through HTTPS_PROXY
+      // (Bun's fetch with FormData isn't proxy-aware), so we'd silently fail downstream.
+      rejectMultipartUnderProxy("upload");
+
+      // Track upload role per index so we can split image_urls vs mask_url after the
+      // Promise.all dispatch (which preserves submission order).
+      const uploads: Array<{ path: string; role: "image" | "mask" }> = [];
+      if (req.editTarget) uploads.push({ path: req.editTarget, role: "image" });
+      for (const ref of req.refs) uploads.push({ path: ref, role: "image" });
+      if (req.mask) uploads.push({ path: req.mask, role: "mask" });
+
+      const urls = await Promise.all(
+        uploads.map(u => uploadToApimartCached(baseUrl, headers, u.path, uploadCache, retryOpts)),
+      );
+
+      imageUrls = uploads
+        .map((u, i) => (u.role === "image" ? urls[i] : null))
+        .filter((u): u is string => u !== null);
+      const maskIdx = uploads.findIndex(u => u.role === "mask");
+      maskUrl = maskIdx >= 0 ? urls[maskIdx] : undefined;
     }
 
-    const payload = buildApimartPayload(req);
+    const payload = buildApimartPayload(req, imageUrls, maskUrl);
     const submitUrl = `${baseUrl}/v1/images/generations`;
     const submitRes = await callWithApimartRetry(
       () => httpPost(submitUrl, payload, headers),

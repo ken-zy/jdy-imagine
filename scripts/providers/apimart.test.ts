@@ -314,9 +314,215 @@ describe("apimart pollTask injectable timing", () => {
   });
 });
 
-describe("apimart image input not yet implemented (Task 2.4 placeholder)", () => {
-  test("ref → throws not yet implemented", async () => {
+describe("apimart image input + sha256 cache", () => {
+  const { mkdtempSync, writeFileSync } = require("fs");
+  const { tmpdir } = require("os");
+  const { join } = require("path");
+
+  function tmpFile(name: string, content: Uint8Array | string): string {
+    const dir = mkdtempSync(join(tmpdir(), "apimart-"));
+    const path = join(dir, name);
+    writeFileSync(path, content);
+    return path;
+  }
+
+  function makeFetch(opts: {
+    onUpload?: (req: Request) => Response | Promise<Response>;
+    submitTaskId?: string;
+    pollResult?: any;
+    downloadBytes?: Uint8Array;
+  }) {
+    return (req: Request) => {
+      if (req.url.endsWith("/v1/uploads/images")) {
+        if (opts.onUpload) return opts.onUpload(req);
+        return new Response(JSON.stringify({ url: `https://upload.apimart/${Math.random()}` }), { status: 200 });
+      }
+      if (req.url.endsWith("/v1/images/generations")) {
+        return new Response(JSON.stringify({ data: [{ task_id: opts.submitTaskId ?? "t" }] }), { status: 200 });
+      }
+      if (req.url.includes("/v1/tasks/")) {
+        const result = opts.pollResult ?? {
+          status: "completed",
+          result: { images: [{ url: ["https://cdn/a.png"] }] },
+        };
+        return new Response(JSON.stringify({ data: result }), { status: 200 });
+      }
+      return new Response(opts.downloadBytes ?? new Uint8Array([0x89, 0x50]), { status: 200 });
+    };
+  }
+
+  test("ref → upload → image_urls passthrough", async () => {
+    const refPath = tmpFile("ref.png", new Uint8Array([1, 2, 3, 4]));
+    let submitBody: any;
+    setFetch((req) => {
+      if (req.url.endsWith("/v1/uploads/images")) {
+        return new Response(JSON.stringify({ url: "https://upload.apimart/ref" }), { status: 200 });
+      }
+      if (req.url.endsWith("/v1/images/generations")) {
+        return req.json().then((body) => {
+          submitBody = body;
+          return new Response(JSON.stringify({ data: [{ task_id: "t" }] }), { status: 200 });
+        });
+      }
+      if (req.url.includes("/v1/tasks/")) {
+        return new Response(JSON.stringify({
+          data: { status: "completed", result: { images: [{ url: "https://cdn/a.png" }] } },
+        }), { status: 200 });
+      }
+      return new Response(new Uint8Array([0x89, 0x50]), { status: 200 });
+    });
     const provider = createApimartProvider(config, fastOpts);
-    await expect(provider.generate(baseReq({ refs: ["/tmp/x.png"] }))).rejects.toThrow(/not yet implemented/);
+    const result = await provider.generate(baseReq({ refs: [refPath] }));
+    expect(result.finishReason).toBe("STOP");
+    expect(submitBody.image_urls).toEqual(["https://upload.apimart/ref"]);
+    expect(submitBody.mask_url).toBeUndefined();
+  });
+
+  // Identify each upload by its file basename (which httpPostMultipart preserves on the
+  // FormData "file" entry). Avoids assumptions about mock call ordering, since Promise.all
+  // dispatches concurrent uploads whose fetch arrival order isn't deterministic.
+  function fetchByFilename(opts: {
+    submitTaskId?: string;
+    pollResult?: any;
+  }): Handler {
+    return async (req) => {
+      if (req.url.endsWith("/v1/uploads/images")) {
+        const fd = await req.formData();
+        const file = fd.get("file") as File;
+        return new Response(JSON.stringify({ url: `https://upload.apimart/${file.name}` }), { status: 200 });
+      }
+      if (req.url.endsWith("/v1/images/generations")) {
+        return new Response(JSON.stringify({ data: [{ task_id: opts.submitTaskId ?? "t" }] }), { status: 200 });
+      }
+      if (req.url.includes("/v1/tasks/")) {
+        const result = opts.pollResult ?? {
+          status: "completed",
+          result: { images: [{ url: ["https://cdn/a.png"] }] },
+        };
+        return new Response(JSON.stringify({ data: result }), { status: 200 });
+      }
+      return new Response(new Uint8Array([0x89, 0x50]), { status: 200 });
+    };
+  }
+
+  test("editTarget + refs → editTarget at image_urls[0], refs follow", async () => {
+    const editPath = tmpFile("edit.png", new Uint8Array([1, 1, 1]));
+    const ref1 = tmpFile("r1.png", new Uint8Array([2, 2, 2]));
+    const ref2 = tmpFile("r2.png", new Uint8Array([3, 3, 3]));
+    let submitBody: any;
+    setFetch(async (req) => {
+      if (req.url.endsWith("/v1/images/generations")) {
+        submitBody = await req.json();
+        return new Response(JSON.stringify({ data: [{ task_id: "t" }] }), { status: 200 });
+      }
+      return fetchByFilename({})(req);
+    });
+    const provider = createApimartProvider(config, fastOpts);
+    const result = await provider.generate(baseReq({ editTarget: editPath, refs: [ref1, ref2] }));
+    expect(result.finishReason).toBe("STOP");
+    expect(submitBody.image_urls).toEqual([
+      "https://upload.apimart/edit.png",
+      "https://upload.apimart/r1.png",
+      "https://upload.apimart/r2.png",
+    ]);
+    expect(submitBody.mask_url).toBeUndefined();
+  });
+
+  test("mask → mask_url field, refs in image_urls", async () => {
+    const ref = tmpFile("r.png", new Uint8Array([1]));
+    const mask = tmpFile("m.png", new Uint8Array([2]));
+    let submitBody: any;
+    setFetch(async (req) => {
+      if (req.url.endsWith("/v1/images/generations")) {
+        submitBody = await req.json();
+        return new Response(JSON.stringify({ data: [{ task_id: "t" }] }), { status: 200 });
+      }
+      return fetchByFilename({})(req);
+    });
+    const provider = createApimartProvider(config, fastOpts);
+    await provider.generate(baseReq({ refs: [ref], mask }));
+    expect(submitBody.image_urls).toEqual(["https://upload.apimart/r.png"]);
+    expect(submitBody.mask_url).toBe("https://upload.apimart/m.png");
+  });
+
+  test("cache hit on second sequential call to same path", async () => {
+    const ref = tmpFile("ref.png", new Uint8Array([42, 42, 42]));
+    let uploadCount = 0;
+    setFetch(makeFetch({
+      onUpload: () => {
+        uploadCount++;
+        return new Response(JSON.stringify({ url: "https://upload/cached" }), { status: 200 });
+      },
+    }));
+    const provider = createApimartProvider(config, fastOpts);
+    await provider.generate(baseReq({ refs: [ref] }));
+    await provider.generate(baseReq({ refs: [ref] }));
+    expect(uploadCount).toBe(1);
+  });
+
+  test("cache hit on concurrent calls with same content (different paths)", async () => {
+    const sameContent = new Uint8Array([7, 7, 7, 7]);
+    const path1 = tmpFile("a.png", sameContent);
+    const path2 = tmpFile("b.png", sameContent);
+    let uploadCount = 0;
+    setFetch(makeFetch({
+      onUpload: async () => {
+        uploadCount++;
+        // Tiny delay to ensure both refs hit cache in-flight.
+        await new Promise((r) => setTimeout(r, 5));
+        return new Response(JSON.stringify({ url: "https://upload/dedup" }), { status: 200 });
+      },
+    }));
+    const provider = createApimartProvider(config, fastOpts);
+    await provider.generate(baseReq({ refs: [path1, path2] }));
+    expect(uploadCount).toBe(1);
+  });
+
+  test("rejected upload clears cache → second call retries fresh", async () => {
+    const ref = tmpFile("retry.png", new Uint8Array([9, 9, 9]));
+    let uploadCount = 0;
+    setFetch(makeFetch({
+      onUpload: () => {
+        uploadCount++;
+        // First outer generate: 4 attempts of 502 exhaust RETRY_DELAYS → throws.
+        // Second outer generate: cache cleared by catch+delete, fresh upload succeeds.
+        if (uploadCount <= 4) return new Response("upstream", { status: 502 });
+        return new Response(JSON.stringify({ url: "https://upload/recovered" }), { status: 200 });
+      },
+    }));
+    const provider = createApimartProvider(config, fastOpts);
+    await expect(provider.generate(baseReq({ refs: [ref] }))).rejects.toThrow(/upload failed/);
+    const result = await provider.generate(baseReq({ refs: [ref] }));
+    expect(result.finishReason).toBe("STOP");
+    expect(uploadCount).toBe(5); // 4 failed + 1 success
+  });
+
+  test("HTTPS_PROXY set → throws before any upload", async () => {
+    const ref = tmpFile("p.png", new Uint8Array([1]));
+    const oldProxy = process.env.HTTPS_PROXY;
+    process.env.HTTPS_PROXY = "http://proxy:8080";
+    let uploadCalled = false;
+    setFetch(makeFetch({
+      onUpload: () => { uploadCalled = true; return new Response("{}", { status: 200 }); },
+    }));
+    try {
+      const provider = createApimartProvider(config, fastOpts);
+      await expect(provider.generate(baseReq({ refs: [ref] }))).rejects.toThrow(
+        /multipart upload.*HTTP proxy/,
+      );
+      expect(uploadCalled).toBe(false);
+    } finally {
+      if (oldProxy === undefined) delete process.env.HTTPS_PROXY;
+      else process.env.HTTPS_PROXY = oldProxy;
+    }
+  });
+
+  test("upload response missing url → throws", async () => {
+    const ref = tmpFile("noUrl.png", new Uint8Array([5]));
+    setFetch(makeFetch({
+      onUpload: () => new Response(JSON.stringify({}), { status: 200 }),
+    }));
+    const provider = createApimartProvider(config, fastOpts);
+    await expect(provider.generate(baseReq({ refs: [ref] }))).rejects.toThrow(/upload response missing url/);
   });
 });
