@@ -353,7 +353,19 @@ export function createApimartProvider(
     const taskId = (submitRes.data as any)?.data?.[0]?.task_id;
     if (!taskId) throw new Error("apimart submit response missing task_id");
 
-    const polled = await pollTask(baseUrl, apiKey, taskId, pollOpts, retryOpts);
+    let polled;
+    try {
+      polled = await pollTask(baseUrl, apiKey, taskId, pollOpts, retryOpts);
+    } catch (err) {
+      // Once submit succeeds, every downstream failure (poll/download retry exhaust,
+      // unexpected throw, or polling timeout) MUST carry task_id so users can recover
+      // via the apimart console. pollTask's timeout branch already includes it; for
+      // anything else, append idempotently.
+      if (err instanceof Error && !err.message.includes("task_id=")) {
+        err.message = `${err.message} (task_id=${taskId})`;
+      }
+      throw err;
+    }
     if ("error" in polled) {
       return {
         images: [],

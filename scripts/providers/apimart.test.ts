@@ -286,6 +286,39 @@ describe("apimart generate (text-only)", () => {
     const provider = createApimartProvider(config, fastOpts);
     await expect(provider.generate(baseReq())).rejects.toThrow(/missing task_id/);
   });
+
+  test("poll 502 exhausted → throw with task_id for manual recovery", async () => {
+    setFetch((req) => {
+      if (req.url.includes("/generations")) {
+        return new Response(JSON.stringify({ data: [{ task_id: "task-pending-502" }] }), { status: 200 });
+      }
+      if (req.url.includes("/tasks/")) {
+        return new Response("upstream", { status: 502 });
+      }
+      return new Response("unexpected", { status: 500 });
+    });
+    const provider = createApimartProvider(config, fastOpts);
+    await expect(provider.generate(baseReq())).rejects.toThrow(/apimart poll failed.*task_id=task-pending-502/);
+  });
+
+  test("download 502 exhausted → throw with task_id for manual recovery", async () => {
+    setFetch((req) => {
+      if (req.url.includes("/generations")) {
+        return new Response(JSON.stringify({ data: [{ task_id: "task-completed-bad-cdn" }] }), { status: 200 });
+      }
+      if (req.url.includes("/tasks/")) {
+        return new Response(JSON.stringify({
+          data: { status: "completed", result: { images: [{ url: ["https://cdn.apimart/broken.png"] }] } },
+        }), { status: 200 });
+      }
+      if (req.url === "https://cdn.apimart/broken.png") {
+        return new Response("cdn down", { status: 502 });
+      }
+      return new Response("unexpected", { status: 500 });
+    });
+    const provider = createApimartProvider(config, fastOpts);
+    await expect(provider.generate(baseReq())).rejects.toThrow(/apimart download failed.*task_id=task-completed-bad-cdn/);
+  });
 });
 
 describe("apimart pollTask injectable timing", () => {
